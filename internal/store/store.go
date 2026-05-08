@@ -328,12 +328,14 @@ func boolInt(v bool) int {
 	}
 	return 0
 }
+
 func unix(t time.Time) int64 {
 	if t.IsZero() {
 		return 0
 	}
 	return t.UTC().Unix()
 }
+
 func fromUnix(v int64) time.Time {
 	if v <= 0 {
 		return time.Time{}
