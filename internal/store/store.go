@@ -233,7 +233,7 @@ func (s *Store) ListChats(ctx context.Context, limit int, unread bool) ([]Chat, 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []Chat
 	for rows.Next() {
 		var c Chat
@@ -305,7 +305,7 @@ func (s *Store) messages(ctx context.Context, filter MessageFilter, search bool)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []Message
 	for rows.Next() {
 		var m Message

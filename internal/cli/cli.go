@@ -147,7 +147,7 @@ func (r *runtime) withStore(fn func(*store.Store) error) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	return fn(st)
 }
 
@@ -393,22 +393,44 @@ func (r *runtime) printProbe(report telegramdesktop.Report) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(report)
 	}
-	fmt.Fprintf(r.stdout, "path: %s\n", report.Path)
-	fmt.Fprintf(r.stdout, "exists: %t\n", report.Exists)
-	fmt.Fprintf(r.stdout, "accessible: %t\n", report.Accessible)
-	fmt.Fprintf(r.stdout, "store: %s\n", report.Store)
-	fmt.Fprintf(r.stdout, "sqlite_files: %d\n", report.SQLiteFiles)
-	fmt.Fprintf(r.stdout, "tdesktop_files: %d\n", report.TDesktopFiles)
-	fmt.Fprintf(r.stdout, "files_scanned: %d\n", report.FilesScanned)
-	fmt.Fprintf(r.stdout, "bytes_scanned: %d\n", report.BytesScanned)
+	if _, err := fmt.Fprintf(r.stdout, "path: %s\n", report.Path); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(r.stdout, "exists: %t\n", report.Exists); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(r.stdout, "accessible: %t\n", report.Accessible); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(r.stdout, "store: %s\n", report.Store); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(r.stdout, "sqlite_files: %d\n", report.SQLiteFiles); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(r.stdout, "tdesktop_files: %d\n", report.TDesktopFiles); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(r.stdout, "files_scanned: %d\n", report.FilesScanned); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(r.stdout, "bytes_scanned: %d\n", report.BytesScanned); err != nil {
+		return err
+	}
 	if report.AccountDirs > 0 {
-		fmt.Fprintf(r.stdout, "account_dirs: %d\n", report.AccountDirs)
+		if _, err := fmt.Fprintf(r.stdout, "account_dirs: %d\n", report.AccountDirs); err != nil {
+			return err
+		}
 	}
 	if report.Error != "" {
-		fmt.Fprintf(r.stdout, "error: %s\n", report.Error)
+		if _, err := fmt.Fprintf(r.stdout, "error: %s\n", report.Error); err != nil {
+			return err
+		}
 	}
 	if report.Note != "" {
-		fmt.Fprintf(r.stdout, "note: %s\n", report.Note)
+		if _, err := fmt.Fprintf(r.stdout, "note: %s\n", report.Note); err != nil {
+			return err
+		}
 	}
 	return nil
 }

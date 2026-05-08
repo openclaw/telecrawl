@@ -137,7 +137,7 @@ func sniffFile(path string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var header [maxProbeBytes]byte
 	n, err := io.ReadFull(f, header[:])
 	if err != nil && !errorsIsEOF(err) {
@@ -163,7 +163,7 @@ func isLikelyAccountDir(name string) bool {
 		return false
 	}
 	for _, r := range name {
-		if !((r >= '0' && r <= '9') || (r >= 'A' && r <= 'F')) {
+		if (r < '0' || r > '9') && (r < 'A' || r > 'F') {
 			return false
 		}
 	}
