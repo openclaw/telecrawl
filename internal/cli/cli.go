@@ -443,21 +443,31 @@ func (r *runtime) print(v any) error {
 	}
 	switch value := v.(type) {
 	case store.Status:
-		fmt.Fprintf(r.stdout, "db_path: %s\nchats: %d\nmessages: %d\nunread_chats: %d\nunread_messages: %d\nmedia_messages: %d\n",
-			value.DBPath, value.Chats, value.Messages, value.UnreadChats, value.UnreadMessages, value.MediaMessages)
+		if _, err := fmt.Fprintf(r.stdout, "db_path: %s\nchats: %d\nmessages: %d\nunread_chats: %d\nunread_messages: %d\nmedia_messages: %d\n",
+			value.DBPath, value.Chats, value.Messages, value.UnreadChats, value.UnreadMessages, value.MediaMessages); err != nil {
+			return err
+		}
 		if !value.OldestMessage.IsZero() {
-			fmt.Fprintf(r.stdout, "oldest_message: %s\n", value.OldestMessage.Format(time.RFC3339))
+			if _, err := fmt.Fprintf(r.stdout, "oldest_message: %s\n", value.OldestMessage.Format(time.RFC3339)); err != nil {
+				return err
+			}
 		}
 		if !value.NewestMessage.IsZero() {
-			fmt.Fprintf(r.stdout, "newest_message: %s\n", value.NewestMessage.Format(time.RFC3339))
+			if _, err := fmt.Fprintf(r.stdout, "newest_message: %s\n", value.NewestMessage.Format(time.RFC3339)); err != nil {
+				return err
+			}
 		}
 		if !value.LastImportAt.IsZero() {
-			fmt.Fprintf(r.stdout, "last_import_at: %s\n", value.LastImportAt.Format(time.RFC3339))
+			if _, err := fmt.Fprintf(r.stdout, "last_import_at: %s\n", value.LastImportAt.Format(time.RFC3339)); err != nil {
+				return err
+			}
 		}
 		return nil
 	case store.ImportStats:
-		fmt.Fprintf(r.stdout, "source_path: %s\ndb_path: %s\nchats: %d\nmessages: %d\nmedia_messages: %d\nstarted_at: %s\nfinished_at: %s\n",
-			value.SourcePath, value.DBPath, value.Chats, value.Messages, value.MediaMessages, value.StartedAt.Format(time.RFC3339), value.FinishedAt.Format(time.RFC3339))
+		if _, err := fmt.Fprintf(r.stdout, "source_path: %s\ndb_path: %s\nchats: %d\nmessages: %d\nmedia_messages: %d\nstarted_at: %s\nfinished_at: %s\n",
+			value.SourcePath, value.DBPath, value.Chats, value.Messages, value.MediaMessages, value.StartedAt.Format(time.RFC3339), value.FinishedAt.Format(time.RFC3339)); err != nil {
+			return err
+		}
 		return nil
 	default:
 		enc.SetIndent("", "  ")
