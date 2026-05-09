@@ -4,7 +4,15 @@ All notable changes to this project are documented here.
 
 The format follows Keep a Changelog, and this project uses Semantic Versioning.
 
-## [Unreleased]
+## [0.2.0] - Unreleased
+
+### Added
+
+- Archive Telegram dialog folders and forum topics, with CLI reads via
+  `folders`, `chats --folder`, `topics --chat`, and `messages --topic`.
+- Preserve reply/thread IDs, pinned messages, edits, forwards, reactions,
+  view/reply counts, and richer media titles during import, search, and
+  encrypted backup restore.
 
 ## [0.1.0] - 2026-05-08
 

@@ -97,6 +97,10 @@ func (r *runtime) dispatch(args []string) error {
 		return r.runStatus(args[1:])
 	case "chats":
 		return r.runChats(args[1:])
+	case "folders":
+		return r.runFolders(args[1:])
+	case "topics":
+		return r.runTopics(args[1:])
 	case "messages":
 		return r.runMessages(args[1:])
 	case "search":
@@ -199,7 +203,7 @@ func (r *runtime) runImport(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := st.ReplaceAll(r.ctx, result.Stats, result.Chats, result.Messages); err != nil {
+		if err := st.ReplaceAll(r.ctx, result.Stats, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages); err != nil {
 			return err
 		}
 		return r.print(result.Stats)
@@ -211,15 +215,61 @@ func (r *runtime) runChats(args []string) error {
 	fs.SetOutput(io.Discard)
 	limit := fs.Int("limit", 50, "")
 	unread := fs.Bool("unread", false, "")
+	folder := fs.String("folder", "", "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
 	return r.withStore(func(st *store.Store) error {
+		if *folder != "" {
+			chats, err := st.ChatsInFolder(r.ctx, *folder, *limit)
+			if err != nil {
+				return err
+			}
+			return r.print(chats)
+		}
 		chats, err := st.ListChats(r.ctx, *limit, *unread)
 		if err != nil {
 			return err
 		}
 		return r.print(chats)
+	})
+}
+
+func (r *runtime) runFolders(args []string) error {
+	fs := flag.NewFlagSet("telecrawl folders", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() != 0 {
+		return usageErr(errors.New("folders takes flags only"))
+	}
+	return r.withStore(func(st *store.Store) error {
+		folders, err := st.ListFolders(r.ctx)
+		if err != nil {
+			return err
+		}
+		return r.print(folders)
+	})
+}
+
+func (r *runtime) runTopics(args []string) error {
+	fs := flag.NewFlagSet("telecrawl topics", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	chat := fs.String("chat", "", "")
+	limit := fs.Int("limit", 100, "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() != 0 {
+		return usageErr(errors.New("topics takes flags only"))
+	}
+	return r.withStore(func(st *store.Store) error {
+		topics, err := st.ListTopics(r.ctx, *chat, *limit)
+		if err != nil {
+			return err
+		}
+		return r.print(topics)
 	})
 }
 
@@ -257,12 +307,14 @@ func (r *runtime) messageFilter(name string, args []string, requireQuery bool) (
 	var filter store.MessageFilter
 	fs.StringVar(&filter.ChatJID, "chat", "", "")
 	fs.StringVar(&filter.Sender, "sender", "", "")
+	fs.StringVar(&filter.TopicID, "topic", "", "")
 	fs.IntVar(&filter.Limit, "limit", 50, "")
 	after := fs.String("after", "", "")
 	before := fs.String("before", "", "")
 	fromMe := fs.Bool("from-me", false, "")
 	fromThem := fs.Bool("from-them", false, "")
 	fs.BoolVar(&filter.HasMedia, "media", false, "")
+	fs.BoolVar(&filter.Pinned, "pinned", false, "")
 	fs.BoolVar(&filter.Asc, "asc", false, "")
 	if err := fs.Parse(args); err != nil {
 		return filter, usageErr(err)
@@ -447,6 +499,9 @@ func (r *runtime) print(v any) error {
 			value.DBPath, value.Chats, value.Messages, value.UnreadChats, value.UnreadMessages, value.MediaMessages); err != nil {
 			return err
 		}
+		if _, err := fmt.Fprintf(r.stdout, "folders: %d\ntopics: %d\n", value.Folders, value.Topics); err != nil {
+			return err
+		}
 		if !value.OldestMessage.IsZero() {
 			if _, err := fmt.Fprintf(r.stdout, "oldest_message: %s\n", value.OldestMessage.Format(time.RFC3339)); err != nil {
 				return err
@@ -486,9 +541,11 @@ usage:
   telecrawl [--json] doctor [--path PATH]
   telecrawl [--json] import [--path PATH] [--dialogs-limit N] [--messages-limit N]
   telecrawl [--json] status
-  telecrawl [--json] chats [--limit N] [--unread]
-  telecrawl [--json] messages [--chat ID] [--limit N] [--after DATE]
-  telecrawl [--json] search "query" [--chat ID]
+  telecrawl [--json] folders
+  telecrawl [--json] chats [--limit N] [--unread] [--folder ID]
+  telecrawl [--json] topics --chat ID [--limit N]
+  telecrawl [--json] messages [--chat ID] [--topic ID] [--limit N] [--after DATE]
+  telecrawl [--json] search "query" [--chat ID] [--topic ID]
   telecrawl [--json] backup init|push|pull|status
   telecrawl deps install
   telecrawl version

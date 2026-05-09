@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 type Store struct {
 	db   *sql.DB
@@ -37,6 +37,8 @@ type Status struct {
 	UnreadMessages int       `json:"unread_messages"`
 	Messages       int       `json:"messages"`
 	MediaMessages  int       `json:"media_messages"`
+	Folders        int       `json:"folders"`
+	Topics         int       `json:"topics"`
 	OldestMessage  time.Time `json:"oldest_message,omitzero"`
 	NewestMessage  time.Time `json:"newest_message,omitzero"`
 	LastImportAt   time.Time `json:"last_import_at,omitzero"`
@@ -51,6 +53,38 @@ type Chat struct {
 	LastMessageAt time.Time `json:"last_message_at,omitzero"`
 	UnreadCount   int       `json:"unread_count"`
 	MessageCount  int       `json:"message_count"`
+	FolderID      string    `json:"folder_id,omitempty"`
+	Forum         bool      `json:"forum,omitempty"`
+}
+
+type Folder struct {
+	ID        string `json:"id"`
+	Title     string `json:"title,omitempty"`
+	Emoticon  string `json:"emoticon,omitempty"`
+	Color     int    `json:"color,omitempty"`
+	FlagsJSON string `json:"flags_json,omitempty"`
+}
+
+type FolderChat struct {
+	FolderID string `json:"folder_id"`
+	ChatJID  string `json:"chat_jid"`
+	Position int    `json:"position"`
+}
+
+type Topic struct {
+	ChatJID              string    `json:"chat_jid"`
+	TopicID              string    `json:"topic_id"`
+	Title                string    `json:"title,omitempty"`
+	TopMessageID         string    `json:"top_message_id,omitempty"`
+	IconColor            int       `json:"icon_color,omitempty"`
+	IconEmojiID          string    `json:"icon_emoji_id,omitempty"`
+	UnreadCount          int       `json:"unread_count"`
+	UnreadMentionsCount  int       `json:"unread_mentions_count"`
+	UnreadReactionsCount int       `json:"unread_reactions_count"`
+	Pinned               bool      `json:"pinned,omitempty"`
+	Closed               bool      `json:"closed,omitempty"`
+	Hidden               bool      `json:"hidden,omitempty"`
+	LastMessageAt        time.Time `json:"last_message_at,omitzero"`
 }
 
 type Contact struct {
@@ -83,35 +117,48 @@ type GroupParticipant struct {
 }
 
 type Message struct {
-	SourcePK    int64     `json:"source_pk"`
-	ChatJID     string    `json:"chat_jid"`
-	ChatName    string    `json:"chat_name,omitempty"`
-	MessageID   string    `json:"message_id"`
-	SenderJID   string    `json:"sender_jid,omitempty"`
-	SenderName  string    `json:"sender_name,omitempty"`
-	Timestamp   time.Time `json:"timestamp"`
-	FromMe      bool      `json:"from_me"`
-	Text        string    `json:"text,omitempty"`
-	RawType     int       `json:"raw_type"`
-	MessageType string    `json:"message_type,omitempty"`
-	MediaType   string    `json:"media_type,omitempty"`
-	MediaTitle  string    `json:"media_title,omitempty"`
-	MediaPath   string    `json:"media_path,omitempty"`
-	MediaURL    string    `json:"media_url,omitempty"`
-	MediaSize   int64     `json:"media_size,omitempty"`
-	Starred     bool      `json:"starred,omitempty"`
-	Snippet     string    `json:"snippet,omitempty"`
+	SourcePK      int64     `json:"source_pk"`
+	ChatJID       string    `json:"chat_jid"`
+	ChatName      string    `json:"chat_name,omitempty"`
+	MessageID     string    `json:"message_id"`
+	SenderJID     string    `json:"sender_jid,omitempty"`
+	SenderName    string    `json:"sender_name,omitempty"`
+	Timestamp     time.Time `json:"timestamp"`
+	EditTime      time.Time `json:"edit_timestamp,omitzero"`
+	FromMe        bool      `json:"from_me"`
+	Text          string    `json:"text,omitempty"`
+	RawType       int       `json:"raw_type"`
+	MessageType   string    `json:"message_type,omitempty"`
+	MediaType     string    `json:"media_type,omitempty"`
+	MediaTitle    string    `json:"media_title,omitempty"`
+	MediaPath     string    `json:"media_path,omitempty"`
+	MediaURL      string    `json:"media_url,omitempty"`
+	MediaSize     int64     `json:"media_size,omitempty"`
+	Starred       bool      `json:"starred,omitempty"`
+	TopicID       string    `json:"topic_id,omitempty"`
+	ReplyToID     string    `json:"reply_to_message_id,omitempty"`
+	ReplyToChat   string    `json:"reply_to_chat_id,omitempty"`
+	ThreadID      string    `json:"thread_id,omitempty"`
+	ForwardJSON   string    `json:"forward_json,omitempty"`
+	ReactionsJSON string    `json:"reactions_json,omitempty"`
+	Views         int       `json:"views,omitempty"`
+	Forwards      int       `json:"forwards,omitempty"`
+	RepliesCount  int       `json:"replies_count,omitempty"`
+	Pinned        bool      `json:"pinned,omitempty"`
+	Snippet       string    `json:"snippet,omitempty"`
 }
 
 type MessageFilter struct {
 	Query    string
 	ChatJID  string
 	Sender   string
+	TopicID  string
 	Limit    int
 	After    *time.Time
 	Before   *time.Time
 	FromMe   *bool
 	HasMedia bool
+	Pinned   bool
 	Asc      bool
 }
 
@@ -137,6 +184,10 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := migrate(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if _, err := db.ExecContext(ctx, fmt.Sprintf("pragma user_version = %d", schemaVersion)); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -147,26 +198,44 @@ func Open(ctx context.Context, path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) Path() string { return s.path }
 
-func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, chats []Chat, messages []Message) error {
+func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer rollback(tx)
-	for _, q := range []string{"delete from messages_fts", "delete from messages", "delete from chats", "delete from contacts", "delete from groups", "delete from group_participants", "delete from sync_state"} {
+	for _, q := range []string{"delete from messages_fts", "delete from messages", "delete from topics", "delete from folder_chats", "delete from folders", "delete from chats", "delete from contacts", "delete from groups", "delete from group_participants", "delete from sync_state"} {
 		if _, err := tx.ExecContext(ctx, q); err != nil {
 			return err
 		}
 	}
 	for _, c := range chats {
-		if _, err := tx.ExecContext(ctx, `insert into chats(id,kind,name,username,last_message_at,unread_count,message_count) values(?,?,?,?,?,?,?)`,
-			parseInt64(c.JID), c.Kind, c.Name, c.Username, unix(c.LastMessageAt), c.UnreadCount, c.MessageCount); err != nil {
+		if _, err := tx.ExecContext(ctx, `insert into chats(id,kind,name,username,last_message_at,unread_count,message_count,folder_id,forum) values(?,?,?,?,?,?,?,?,?)`,
+			parseInt64(c.JID), c.Kind, c.Name, c.Username, unix(c.LastMessageAt), c.UnreadCount, c.MessageCount, c.FolderID, boolInt(c.Forum)); err != nil {
+			return err
+		}
+	}
+	for _, f := range folders {
+		if _, err := tx.ExecContext(ctx, `insert into folders(id,title,emoticon,color,flags_json) values(?,?,?,?,?)`,
+			f.ID, f.Title, f.Emoticon, f.Color, f.FlagsJSON); err != nil {
+			return err
+		}
+	}
+	for _, fc := range folderChats {
+		if _, err := tx.ExecContext(ctx, `insert into folder_chats(folder_id,chat_jid,position) values(?,?,?)`,
+			fc.FolderID, fc.ChatJID, fc.Position); err != nil {
+			return err
+		}
+	}
+	for _, t := range topics {
+		if _, err := tx.ExecContext(ctx, `insert into topics(chat_jid,topic_id,title,top_message_id,icon_color,icon_emoji_id,unread_count,unread_mentions_count,unread_reactions_count,pinned,closed,hidden,last_message_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			t.ChatJID, t.TopicID, t.Title, t.TopMessageID, t.IconColor, t.IconEmojiID, t.UnreadCount, t.UnreadMentionsCount, t.UnreadReactionsCount, boolInt(t.Pinned), boolInt(t.Closed), boolInt(t.Hidden), unix(t.LastMessageAt)); err != nil {
 			return err
 		}
 	}
 	for _, m := range messages {
-		if _, err := tx.ExecContext(ctx, `insert into messages(source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,starred) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			m.SourcePK, m.ChatJID, m.ChatName, m.MessageID, m.SenderJID, m.SenderName, unix(m.Timestamp), boolInt(m.FromMe), m.Text, m.RawType, m.MessageType, m.MediaType, m.MediaTitle, m.MediaPath, m.MediaURL, m.MediaSize, boolInt(m.Starred)); err != nil {
+		if _, err := tx.ExecContext(ctx, `insert into messages(source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,edit_ts,forward_json,reactions_json,views,forwards,replies_count,pinned) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			m.SourcePK, m.ChatJID, m.ChatName, m.MessageID, m.SenderJID, m.SenderName, unix(m.Timestamp), boolInt(m.FromMe), m.Text, m.RawType, m.MessageType, m.MediaType, m.MediaTitle, m.MediaPath, m.MediaURL, m.MediaSize, boolInt(m.Starred), m.TopicID, m.ReplyToID, m.ReplyToChat, m.ThreadID, unix(m.EditTime), m.ForwardJSON, m.ReactionsJSON, m.Views, m.Forwards, m.RepliesCount, boolInt(m.Pinned)); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `insert into messages_fts(rowid,text,chat,sender,media) values((select rowid from messages where source_pk=?),?,?,?,?)`,
@@ -197,6 +266,8 @@ func (s *Store) Status(ctx context.Context) (Status, error) {
 		{&out.UnreadMessages, "select coalesce(sum(unread_count), 0) from chats"},
 		{&out.Messages, "select count(*) from messages"},
 		{&out.MediaMessages, "select count(*) from messages where media_type <> ''"},
+		{&out.Folders, "select count(*) from folders"},
+		{&out.Topics, "select count(*) from topics"},
 	} {
 		if err := s.db.QueryRowContext(ctx, c.q).Scan(c.dst); err != nil {
 			return out, err
@@ -229,7 +300,7 @@ func (s *Store) ListChats(ctx context.Context, limit int, unread bool) ([]Chat, 
 	if unread {
 		where = "where unread_count > 0"
 	}
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`select cast(id as text),kind,name,username,last_message_at,unread_count,message_count from chats %s order by last_message_at desc limit ?`, where), limit)
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`select cast(id as text),kind,name,username,last_message_at,unread_count,message_count,coalesce(folder_id,''),forum from chats %s order by last_message_at desc limit ?`, where), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -238,11 +309,90 @@ func (s *Store) ListChats(ctx context.Context, limit int, unread bool) ([]Chat, 
 	for rows.Next() {
 		var c Chat
 		var ts int64
-		if err := rows.Scan(&c.JID, &c.Kind, &c.Name, &c.Username, &ts, &c.UnreadCount, &c.MessageCount); err != nil {
+		var forum int
+		if err := rows.Scan(&c.JID, &c.Kind, &c.Name, &c.Username, &ts, &c.UnreadCount, &c.MessageCount, &c.FolderID, &forum); err != nil {
 			return nil, err
 		}
 		c.LastMessageAt = fromUnix(ts)
+		c.Forum = forum != 0
 		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListFolders(ctx context.Context) ([]Folder, error) {
+	rows, err := s.db.QueryContext(ctx, `select id,title,emoticon,color,flags_json from folders order by cast(id as integer), title`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Folder
+	for rows.Next() {
+		var f Folder
+		if err := rows.Scan(&f.ID, &f.Title, &f.Emoticon, &f.Color, &f.FlagsJSON); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ChatsInFolder(ctx context.Context, folderID string, limit int) ([]Chat, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `select cast(c.id as text),c.kind,c.name,c.username,c.last_message_at,c.unread_count,c.message_count,coalesce(c.folder_id,''),c.forum
+from folder_chats fc join chats c on cast(c.id as text)=fc.chat_jid
+where fc.folder_id=?
+order by fc.position asc, c.last_message_at desc
+limit ?`, folderID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Chat
+	for rows.Next() {
+		var c Chat
+		var ts int64
+		var forum int
+		if err := rows.Scan(&c.JID, &c.Kind, &c.Name, &c.Username, &ts, &c.UnreadCount, &c.MessageCount, &c.FolderID, &forum); err != nil {
+			return nil, err
+		}
+		c.LastMessageAt = fromUnix(ts)
+		c.Forum = forum != 0
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListTopics(ctx context.Context, chatJID string, limit int) ([]Topic, error) {
+	if strings.TrimSpace(chatJID) == "" {
+		return nil, errors.New("chat id required")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `select chat_jid,topic_id,title,top_message_id,icon_color,icon_emoji_id,unread_count,unread_mentions_count,unread_reactions_count,pinned,closed,hidden,last_message_at
+from topics where chat_jid=?
+order by pinned desc, last_message_at desc, cast(topic_id as integer) desc
+limit ?`, chatJID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Topic
+	for rows.Next() {
+		var t Topic
+		var ts int64
+		var pinned, closed, hidden int
+		if err := rows.Scan(&t.ChatJID, &t.TopicID, &t.Title, &t.TopMessageID, &t.IconColor, &t.IconEmojiID, &t.UnreadCount, &t.UnreadMentionsCount, &t.UnreadReactionsCount, &pinned, &closed, &hidden, &ts); err != nil {
+			return nil, err
+		}
+		t.Pinned = pinned != 0
+		t.Closed = closed != 0
+		t.Hidden = hidden != 0
+		t.LastMessageAt = fromUnix(ts)
+		out = append(out, t)
 	}
 	return out, rows.Err()
 }
@@ -262,11 +412,11 @@ func (s *Store) messages(ctx context.Context, filter MessageFilter, search bool)
 	if filter.Limit <= 0 {
 		filter.Limit = 50
 	}
-	query := `select source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,starred,'' from messages where 1=1`
+	query := `select source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,edit_ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,forward_json,reactions_json,views,forwards,replies_count,pinned,'' from messages where 1=1`
 	args := []any{}
 	prefix := ""
 	if search {
-		query = `select m.source_pk,m.chat_jid,m.chat_name,m.msg_id,m.sender_jid,m.sender_name,m.ts,m.from_me,m.text,m.raw_type,m.message_type,m.media_type,m.media_title,m.media_path,m.media_url,m.media_size,m.starred,snippet(messages_fts,0,'[',']','...',12) from messages_fts f join messages m on m.rowid=f.rowid where messages_fts match ?`
+		query = `select m.source_pk,m.chat_jid,m.chat_name,m.msg_id,m.sender_jid,m.sender_name,m.ts,m.edit_ts,m.from_me,m.text,m.raw_type,m.message_type,m.media_type,m.media_title,m.media_path,m.media_url,m.media_size,m.starred,m.topic_id,m.reply_to_msg_id,m.reply_to_chat_jid,m.thread_id,m.forward_json,m.reactions_json,m.views,m.forwards,m.replies_count,m.pinned,snippet(messages_fts,0,'[',']','...',12) from messages_fts f join messages m on m.rowid=f.rowid where messages_fts match ?`
 		args = append(args, filter.Query)
 		prefix = "m."
 	}
@@ -277,6 +427,10 @@ func (s *Store) messages(ctx context.Context, filter MessageFilter, search bool)
 	if filter.Sender != "" {
 		query += " and " + prefix + "sender_jid = ?"
 		args = append(args, filter.Sender)
+	}
+	if filter.TopicID != "" {
+		query += " and " + prefix + "topic_id = ?"
+		args = append(args, filter.TopicID)
 	}
 	if filter.After != nil {
 		query += " and " + prefix + "ts >= ?"
@@ -292,6 +446,9 @@ func (s *Store) messages(ctx context.Context, filter MessageFilter, search bool)
 	}
 	if filter.HasMedia {
 		query += " and " + prefix + "media_type <> ''"
+	}
+	if filter.Pinned {
+		query += " and " + prefix + "pinned <> 0"
 	}
 	if search {
 		query += " order by bm25(messages_fts) limit ?"
@@ -309,15 +466,75 @@ func (s *Store) messages(ctx context.Context, filter MessageFilter, search bool)
 	var out []Message
 	for rows.Next() {
 		var m Message
-		var ts int64
-		var fromMe, starred int
-		if err := rows.Scan(&m.SourcePK, &m.ChatJID, &m.ChatName, &m.MessageID, &m.SenderJID, &m.SenderName, &ts, &fromMe, &m.Text, &m.RawType, &m.MessageType, &m.MediaType, &m.MediaTitle, &m.MediaPath, &m.MediaURL, &m.MediaSize, &starred, &m.Snippet); err != nil {
+		var ts, editTS int64
+		var fromMe, starred, pinned int
+		if err := rows.Scan(&m.SourcePK, &m.ChatJID, &m.ChatName, &m.MessageID, &m.SenderJID, &m.SenderName, &ts, &editTS, &fromMe, &m.Text, &m.RawType, &m.MessageType, &m.MediaType, &m.MediaTitle, &m.MediaPath, &m.MediaURL, &m.MediaSize, &starred, &m.TopicID, &m.ReplyToID, &m.ReplyToChat, &m.ThreadID, &m.ForwardJSON, &m.ReactionsJSON, &m.Views, &m.Forwards, &m.RepliesCount, &pinned, &m.Snippet); err != nil {
 			return nil, err
 		}
 		m.Timestamp = fromUnix(ts)
+		m.EditTime = fromUnix(editTS)
 		m.FromMe = fromMe != 0
 		m.Starred = starred != 0
+		m.Pinned = pinned != 0
 		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func migrate(ctx context.Context, db *sql.DB) error {
+	adds := map[string]map[string]string{
+		"chats": {
+			"folder_id": "text",
+			"forum":     "integer not null default 0",
+		},
+		"messages": {
+			"topic_id":          "text",
+			"reply_to_msg_id":   "text",
+			"reply_to_chat_jid": "text",
+			"thread_id":         "text",
+			"edit_ts":           "integer",
+			"forward_json":      "text",
+			"reactions_json":    "text",
+			"views":             "integer not null default 0",
+			"forwards":          "integer not null default 0",
+			"replies_count":     "integer not null default 0",
+			"pinned":            "integer not null default 0",
+		},
+	}
+	for table, defs := range adds {
+		existing, err := columns(ctx, db, table)
+		if err != nil {
+			return err
+		}
+		for name, def := range defs {
+			if existing[name] {
+				continue
+			}
+			if _, err := db.ExecContext(ctx, fmt.Sprintf("alter table %s add column %s %s", table, name, def)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func columns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, "pragma table_info("+table+")")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return nil, err
+		}
+		out[name] = true
 	}
 	return out, rows.Err()
 }

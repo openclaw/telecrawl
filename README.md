@@ -58,13 +58,24 @@ telecrawl import --dialogs-limit 0 --messages-limit 0
 Useful reads:
 
 ```bash
+telecrawl folders
 telecrawl chats --limit 20
+telecrawl chats --folder FOLDER_ID
 telecrawl chats --unread
+telecrawl topics --chat CHAT_ID
 telecrawl messages --limit 20
 telecrawl messages --chat CHAT_ID --after 2026-01-01
+telecrawl messages --chat CHAT_ID --topic TOPIC_ID
+telecrawl messages --chat CHAT_ID --pinned
 telecrawl search "query"
-telecrawl search "query" --chat CHAT_ID
+telecrawl search "query" --chat CHAT_ID --topic TOPIC_ID
 ```
+
+Telegram folders, forum topics, reply/thread IDs, pinned messages, edits,
+forwards, reactions, view/reply counts, and richer media titles are archived
+when Telethon exposes them for the active account. Folder rows include explicit
+membership from Telegram dialog filters; dynamic folder rules are recorded as
+metadata and may not expand to every matching chat.
 
 Add `--json` before the command for machine-readable output:
 

@@ -31,8 +31,11 @@ type Manifest struct {
 type Counts struct {
 	Contacts     int `json:"contacts"`
 	Chats        int `json:"chats"`
+	Folders      int `json:"folders"`
+	FolderChats  int `json:"folder_chats"`
 	Groups       int `json:"groups"`
 	Participants int `json:"participants"`
+	Topics       int `json:"topics"`
 	Messages     int `json:"messages"`
 }
 
@@ -175,8 +178,11 @@ func writeSnapshot(ctx context.Context, cfg Config, data store.SnapshotData, old
 	}{
 		{"contacts", "data/contacts.jsonl.gz.age", data.Contacts},
 		{"chats", "data/chats.jsonl.gz.age", data.Chats},
+		{"folders", "data/folders.jsonl.gz.age", data.Folders},
+		{"folder_chats", "data/folder_chats.jsonl.gz.age", data.FolderChats},
 		{"groups", "data/groups.jsonl.gz.age", data.Groups},
 		{"group_participants", "data/group_participants.jsonl.gz.age", data.Participants},
+		{"topics", "data/topics.jsonl.gz.age", data.Topics},
 	}
 	for _, table := range staticTables {
 		if err := add(table.table, table.path, table.rows); err != nil {
@@ -197,8 +203,11 @@ func writeSnapshot(ctx context.Context, cfg Config, data store.SnapshotData, old
 		Counts: Counts{
 			Contacts:     len(data.Contacts),
 			Chats:        len(data.Chats),
+			Folders:      len(data.Folders),
+			FolderChats:  len(data.FolderChats),
 			Groups:       len(data.Groups),
 			Participants: len(data.Participants),
+			Topics:       len(data.Topics),
 			Messages:     len(data.Messages),
 		},
 		Shards: shards,
@@ -237,12 +246,24 @@ func readSnapshot(cfg Config, manifest Manifest) (store.SnapshotData, error) {
 			if err := decodeJSONL(plaintext, &data.Chats); err != nil {
 				return store.SnapshotData{}, err
 			}
+		case "folders":
+			if err := decodeJSONL(plaintext, &data.Folders); err != nil {
+				return store.SnapshotData{}, err
+			}
+		case "folder_chats":
+			if err := decodeJSONL(plaintext, &data.FolderChats); err != nil {
+				return store.SnapshotData{}, err
+			}
 		case "groups":
 			if err := decodeJSONL(plaintext, &data.Groups); err != nil {
 				return store.SnapshotData{}, err
 			}
 		case "group_participants":
 			if err := decodeJSONL(plaintext, &data.Participants); err != nil {
+				return store.SnapshotData{}, err
+			}
+		case "topics":
+			if err := decodeJSONL(plaintext, &data.Topics); err != nil {
 				return store.SnapshotData{}, err
 			}
 		case "messages":

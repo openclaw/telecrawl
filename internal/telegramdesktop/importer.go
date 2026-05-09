@@ -29,9 +29,12 @@ type ImportOptions struct {
 }
 
 type ImportResult struct {
-	Stats    store.ImportStats
-	Chats    []store.Chat
-	Messages []store.Message
+	Stats       store.ImportStats
+	Chats       []store.Chat
+	Folders     []store.Folder
+	FolderChats []store.FolderChat
+	Topics      []store.Topic
+	Messages    []store.Message
 }
 
 type pyResult struct {
@@ -46,20 +49,61 @@ type pyResult struct {
 		LastMessageAt string `json:"last_message_at"`
 		UnreadCount   int    `json:"unread_count"`
 		MessageCount  int    `json:"message_count"`
+		FolderID      string `json:"folder_id"`
+		Forum         bool   `json:"forum"`
 	} `json:"chats"`
+	Folders []struct {
+		ID        string `json:"id"`
+		Title     string `json:"title"`
+		Emoticon  string `json:"emoticon"`
+		Color     int    `json:"color"`
+		FlagsJSON string `json:"flags_json"`
+	} `json:"folders"`
+	FolderChats []struct {
+		FolderID string `json:"folder_id"`
+		ChatID   string `json:"chat_id"`
+		Position int    `json:"position"`
+	} `json:"folder_chats"`
+	Topics []struct {
+		ChatID               string `json:"chat_id"`
+		TopicID              string `json:"topic_id"`
+		Title                string `json:"title"`
+		TopMessageID         string `json:"top_message_id"`
+		IconColor            int    `json:"icon_color"`
+		IconEmojiID          string `json:"icon_emoji_id"`
+		UnreadCount          int    `json:"unread_count"`
+		UnreadMentionsCount  int    `json:"unread_mentions_count"`
+		UnreadReactionsCount int    `json:"unread_reactions_count"`
+		Pinned               bool   `json:"pinned"`
+		Closed               bool   `json:"closed"`
+		Hidden               bool   `json:"hidden"`
+		LastMessageAt        string `json:"last_message_at"`
+	} `json:"topics"`
 	Messages []struct {
-		SourcePK    int64  `json:"source_pk"`
-		ChatID      string `json:"chat_id"`
-		ChatName    string `json:"chat_name"`
-		MessageID   string `json:"message_id"`
-		SenderID    string `json:"sender_id"`
-		SenderName  string `json:"sender_name"`
-		Timestamp   string `json:"timestamp"`
-		FromMe      bool   `json:"from_me"`
-		Text        string `json:"text"`
-		MessageType string `json:"message_type"`
-		MediaType   string `json:"media_type"`
-		MediaTitle  string `json:"media_title"`
+		SourcePK         int64  `json:"source_pk"`
+		ChatID           string `json:"chat_id"`
+		ChatName         string `json:"chat_name"`
+		MessageID        string `json:"message_id"`
+		TopicID          string `json:"topic_id"`
+		ReplyToMessageID string `json:"reply_to_message_id"`
+		ThreadID         string `json:"thread_id"`
+		ReplyToChatID    string `json:"reply_to_chat_id"`
+		SenderID         string `json:"sender_id"`
+		SenderName       string `json:"sender_name"`
+		Timestamp        string `json:"timestamp"`
+		EditTimestamp    string `json:"edit_timestamp"`
+		FromMe           bool   `json:"from_me"`
+		Text             string `json:"text"`
+		MessageType      string `json:"message_type"`
+		MediaType        string `json:"media_type"`
+		MediaTitle       string `json:"media_title"`
+		MediaSize        int64  `json:"media_size"`
+		Views            int    `json:"views"`
+		Forwards         int    `json:"forwards"`
+		RepliesCount     int    `json:"replies_count"`
+		Pinned           bool   `json:"pinned"`
+		ForwardJSON      string `json:"forward_json"`
+		ReactionsJSON    string `json:"reactions_json"`
 	} `json:"messages"`
 }
 
@@ -123,22 +167,69 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 			LastMessageAt: parseTime(c.LastMessageAt),
 			UnreadCount:   c.UnreadCount,
 			MessageCount:  c.MessageCount,
+			FolderID:      c.FolderID,
+			Forum:         c.Forum,
+		})
+	}
+	for _, f := range raw.Folders {
+		result.Folders = append(result.Folders, store.Folder{
+			ID:        f.ID,
+			Title:     f.Title,
+			Emoticon:  f.Emoticon,
+			Color:     f.Color,
+			FlagsJSON: f.FlagsJSON,
+		})
+	}
+	for _, fc := range raw.FolderChats {
+		result.FolderChats = append(result.FolderChats, store.FolderChat{
+			FolderID: fc.FolderID,
+			ChatJID:  fc.ChatID,
+			Position: fc.Position,
+		})
+	}
+	for _, t := range raw.Topics {
+		result.Topics = append(result.Topics, store.Topic{
+			ChatJID:              t.ChatID,
+			TopicID:              t.TopicID,
+			Title:                t.Title,
+			TopMessageID:         t.TopMessageID,
+			IconColor:            t.IconColor,
+			IconEmojiID:          t.IconEmojiID,
+			UnreadCount:          t.UnreadCount,
+			UnreadMentionsCount:  t.UnreadMentionsCount,
+			UnreadReactionsCount: t.UnreadReactionsCount,
+			Pinned:               t.Pinned,
+			Closed:               t.Closed,
+			Hidden:               t.Hidden,
+			LastMessageAt:        parseTime(t.LastMessageAt),
 		})
 	}
 	for _, m := range raw.Messages {
 		msg := store.Message{
-			SourcePK:    m.SourcePK,
-			ChatJID:     m.ChatID,
-			ChatName:    m.ChatName,
-			MessageID:   m.MessageID,
-			SenderJID:   m.SenderID,
-			SenderName:  m.SenderName,
-			Timestamp:   parseTime(m.Timestamp),
-			FromMe:      m.FromMe,
-			Text:        m.Text,
-			MessageType: m.MessageType,
-			MediaType:   m.MediaType,
-			MediaTitle:  m.MediaTitle,
+			SourcePK:      m.SourcePK,
+			ChatJID:       m.ChatID,
+			ChatName:      m.ChatName,
+			MessageID:     m.MessageID,
+			TopicID:       m.TopicID,
+			ReplyToID:     m.ReplyToMessageID,
+			ReplyToChat:   m.ReplyToChatID,
+			ThreadID:      m.ThreadID,
+			SenderJID:     m.SenderID,
+			SenderName:    m.SenderName,
+			Timestamp:     parseTime(m.Timestamp),
+			EditTime:      parseTime(m.EditTimestamp),
+			FromMe:        m.FromMe,
+			Text:          m.Text,
+			MessageType:   m.MessageType,
+			MediaType:     m.MediaType,
+			MediaTitle:    m.MediaTitle,
+			MediaSize:     m.MediaSize,
+			Views:         m.Views,
+			Forwards:      m.Forwards,
+			RepliesCount:  m.RepliesCount,
+			Pinned:        m.Pinned,
+			ForwardJSON:   m.ForwardJSON,
+			ReactionsJSON: m.ReactionsJSON,
 		}
 		if msg.MediaType != "" {
 			result.Stats.MediaMessages++
