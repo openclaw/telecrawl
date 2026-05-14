@@ -1,0 +1,9 @@
+.git
+.github
+.DS_Store
+.env
+*.out
+*.test
+coverage.*
+dist/
+telecrawl

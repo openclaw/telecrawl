@@ -26,6 +26,16 @@ Or install with Go:
 go install github.com/openclaw/telecrawl/cmd/telecrawl@latest
 ```
 
+### Docker
+
+```bash
+docker build -t telecrawl .
+docker run --rm -v "$HOME/.telecrawl:/data" -v "$HOME/Library/Application Support/Telegram Desktop/tdata:/tdata:ro" telecrawl --source /tdata doctor
+docker run --rm -v "$HOME/.telecrawl:/data" -v "$HOME/Library/Application Support/Telegram Desktop/tdata:/tdata:ro" telecrawl --source /tdata import
+```
+
+The image packages the Python bridge dependencies. Mount Telegram Desktop `tdata` read-only and keep the archive/config under `/data`.
+
 ## Setup
 
 Install the Python bridge used for Telegram Desktop `tdata` imports:

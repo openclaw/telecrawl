@@ -8,6 +8,7 @@ The format follows Keep a Changelog, and this project uses Semantic Versioning.
 
 ### Added
 
+- Docker: add a local image with packaged Python bridge dependencies, `/data` persistence, read-only `tdata` mounting docs, and Docker CI smoke coverage.
 - Archive Telegram dialog folders and forum topics, with CLI reads via
   `folders`, `chats --folder`, `topics --chat`, and `messages --topic`.
 - Preserve reply/thread IDs, pinned messages, edits, forwards, reactions,
