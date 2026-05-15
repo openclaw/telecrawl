@@ -1,4 +1,4 @@
-# telecrawl
+# ✈️ telecrawl
 
 Telegram Desktop archive CLI.
 
