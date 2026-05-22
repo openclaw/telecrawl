@@ -18,7 +18,7 @@ The format follows Keep a Changelog, and this project uses Semantic Versioning.
 
 ### Changed
 
-- Update `crawlkit` to v0.9.0.
+- Update `crawlkit` to v0.7.0.
 
 ## [0.1.0] - 2026-05-08
 
