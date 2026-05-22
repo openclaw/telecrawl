@@ -89,6 +89,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 
 func (r *runtime) dispatch(args []string) error {
 	switch args[0] {
+	case "metadata":
+		return r.print(controlManifest())
 	case "import", "sync":
 		return r.runImport(args[1:])
 	case "doctor":
@@ -539,6 +541,7 @@ func printUsage(w io.Writer) {
 
 usage:
   telecrawl [--json] doctor [--path PATH]
+  telecrawl [--json] metadata
   telecrawl [--json] import [--path PATH] [--dialogs-limit N] [--messages-limit N]
   telecrawl [--json] status
   telecrawl [--json] folders

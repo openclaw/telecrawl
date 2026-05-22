@@ -4,16 +4,21 @@ All notable changes to this project are documented here.
 
 The format follows Keep a Changelog, and this project uses Semantic Versioning.
 
-## [0.2.0] - Unreleased
+## [0.2.1] - Unreleased
 
 ### Added
 
+- Add `metadata --json` crawlkit control metadata for schedulers and local automation.
 - Docker: add a local image with packaged Python bridge dependencies, `/data` persistence, read-only `tdata` mounting docs, and Docker CI smoke coverage.
 - Archive Telegram dialog folders and forum topics, with CLI reads via
   `folders`, `chats --folder`, `topics --chat`, and `messages --topic`.
 - Preserve reply/thread IDs, pinned messages, edits, forwards, reactions,
   view/reply counts, and richer media titles during import, search, and
   encrypted backup restore.
+
+### Changed
+
+- Update `crawlkit` to v0.9.0.
 
 ## [0.1.0] - 2026-05-08
 
