@@ -248,7 +248,10 @@ async def main():
     out_chats = []
     out_messages = []
     out_topics = []
-    out_folders, folder_memberships = await load_folders(client)
+    out_folders = []
+    folder_memberships = {}
+    if not args.chat:
+        out_folders, folder_memberships = await load_folders(client)
     for dialog in dialogs:
         entity = dialog.entity
         chat_id = str(dialog.id)

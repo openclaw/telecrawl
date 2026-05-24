@@ -198,6 +198,61 @@ func Open(ctx context.Context, path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) Path() string { return s.path }
 
+func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID string, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	chatID := parseInt64(chatJID)
+	for _, q := range []struct {
+		sql  string
+		args []any
+	}{
+		{"delete from messages_fts where rowid in (select rowid from messages where chat_jid = ?)", []any{chatJID}},
+		{"delete from messages where chat_jid = ?", []any{chatJID}},
+		{"delete from topics where chat_jid = ?", []any{chatJID}},
+		{"delete from folder_chats where chat_jid = ?", []any{chatJID}},
+		{"delete from chats where id = ?", []any{chatID}},
+	} {
+		if _, err := tx.ExecContext(ctx, q.sql, q.args...); err != nil {
+			return err
+		}
+	}
+	for _, c := range chats {
+		if _, err := tx.ExecContext(ctx, `insert into chats(id,kind,name,username,last_message_at,unread_count,message_count,folder_id,forum) values(?,?,?,?,?,?,?,?,?)`,
+			parseInt64(c.JID), c.Kind, c.Name, c.Username, unix(c.LastMessageAt), c.UnreadCount, c.MessageCount, c.FolderID, boolInt(c.Forum)); err != nil {
+			return err
+		}
+	}
+	for _, t := range topics {
+		if _, err := tx.ExecContext(ctx, `insert into topics(chat_jid,topic_id,title,top_message_id,icon_color,icon_emoji_id,unread_count,unread_mentions_count,unread_reactions_count,pinned,closed,hidden,last_message_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			t.ChatJID, t.TopicID, t.Title, t.TopMessageID, t.IconColor, t.IconEmojiID, t.UnreadCount, t.UnreadMentionsCount, t.UnreadReactionsCount, boolInt(t.Pinned), boolInt(t.Closed), boolInt(t.Hidden), unix(t.LastMessageAt)); err != nil {
+			return err
+		}
+	}
+	for _, m := range messages {
+		if _, err := tx.ExecContext(ctx, `insert into messages(source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,edit_ts,forward_json,reactions_json,views,forwards,replies_count,pinned) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			m.SourcePK, m.ChatJID, m.ChatName, m.MessageID, m.SenderJID, m.SenderName, unix(m.Timestamp), boolInt(m.FromMe), m.Text, m.RawType, m.MessageType, m.MediaType, m.MediaTitle, m.MediaPath, m.MediaURL, m.MediaSize, boolInt(m.Starred), m.TopicID, m.ReplyToID, m.ReplyToChat, m.ThreadID, unix(m.EditTime), m.ForwardJSON, m.ReactionsJSON, m.Views, m.Forwards, m.RepliesCount, boolInt(m.Pinned)); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `insert into messages_fts(rowid,text,chat,sender,media) values((select rowid from messages where source_pk=?),?,?,?,?)`,
+			m.SourcePK, strings.TrimSpace(m.Text+" "+m.MediaTitle), m.ChatName, m.SenderName, m.MediaType); err != nil {
+			return err
+		}
+	}
+	now := stats.FinishedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	for key, value := range map[string]string{"last_import_at": now.Format(time.RFC3339Nano), "source_path": stats.SourcePath} {
+		if _, err := tx.ExecContext(ctx, `insert into sync_state(key,value,updated_at) values(?,?,?) on conflict(key) do update set value=excluded.value, updated_at=excluded.updated_at`, key, value, unix(now)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

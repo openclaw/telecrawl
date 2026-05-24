@@ -207,8 +207,14 @@ func (r *runtime) runImport(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := st.ReplaceAll(r.ctx, result.Stats, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages); err != nil {
-			return err
+		if *chat != "" {
+			if err := st.UpsertChat(r.ctx, result.Stats, *chat, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages); err != nil {
+				return err
+			}
+		} else {
+			if err := st.ReplaceAll(r.ctx, result.Stats, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages); err != nil {
+				return err
+			}
 		}
 		return r.print(result.Stats)
 	})
