@@ -189,6 +189,7 @@ func (r *runtime) runImport(args []string) error {
 	python := fs.String("python", r.python, "")
 	dialogsLimit := fs.Int("dialogs-limit", 200, "")
 	messagesLimit := fs.Int("messages-limit", 500, "")
+	chat := fs.String("chat", "", "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -201,6 +202,7 @@ func (r *runtime) runImport(args []string) error {
 			Python:        *python,
 			DialogsLimit:  *dialogsLimit,
 			MessagesLimit: *messagesLimit,
+			ChatID:        *chat,
 		}, st.Path())
 		if err != nil {
 			return err
@@ -542,7 +544,7 @@ func printUsage(w io.Writer) {
 usage:
   telecrawl [--json] doctor [--path PATH]
   telecrawl [--json] metadata
-  telecrawl [--json] import [--path PATH] [--dialogs-limit N] [--messages-limit N]
+  telecrawl [--json] import [--path PATH] [--chat ID] [--dialogs-limit N] [--messages-limit N]
   telecrawl [--json] status
   telecrawl [--json] folders
   telecrawl [--json] chats [--limit N] [--unread] [--folder ID]

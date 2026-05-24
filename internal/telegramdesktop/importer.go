@@ -26,6 +26,7 @@ type ImportOptions struct {
 	Session       string
 	DialogsLimit  int
 	MessagesLimit int
+	ChatID        string
 }
 
 type ImportResult struct {
@@ -135,6 +136,9 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 		"--session", session,
 		"--dialogs-limit", fmt.Sprint(opts.DialogsLimit),
 		"--messages-limit", fmt.Sprint(opts.MessagesLimit),
+	}
+	if opts.ChatID != "" {
+		args = append(args, "--chat", opts.ChatID)
 	}
 	cmd := exec.CommandContext(ctx, python, args...) // #nosec G204 -- python and args are explicit CLI configuration.
 	var stdout, stderr bytes.Buffer
