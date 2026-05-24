@@ -134,3 +134,153 @@ func openTestStore(t *testing.T, path string) *Store {
 	})
 	return st
 }
+
+func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 5, 9, 3, 17, 53, 0, time.UTC)
+	later := now.Add(time.Hour)
+
+	st := openTestStore(t, filepath.Join(t.TempDir(), "upsert.db"))
+
+	chatA := Chat{JID: "-1001", Kind: "channel", Name: "Chat A", LastMessageAt: now, UnreadCount: 1, MessageCount: 1, FolderID: "1", Forum: false}
+	chatB := Chat{JID: "-1002", Kind: "group", Name: "Chat B", LastMessageAt: now, UnreadCount: 3, MessageCount: 2, FolderID: "2", Forum: true}
+	topicA := Topic{ChatJID: "-1001", TopicID: "1", Title: "Topic A", LastMessageAt: now}
+	topicB := Topic{ChatJID: "-1002", TopicID: "2", Title: "Topic B", LastMessageAt: now}
+	fcA := FolderChat{FolderID: "1", ChatJID: "-1001", Position: 0}
+	fcB := FolderChat{FolderID: "2", ChatJID: "-1002", Position: 1}
+	msgA := Message{SourcePK: 1, ChatJID: "-1001", ChatName: "Chat A", MessageID: "1", SenderJID: "10", SenderName: "Alice", Timestamp: now, Text: "hello a", MessageType: "Message"}
+	msgB1 := Message{SourcePK: 2, ChatJID: "-1002", ChatName: "Chat B", MessageID: "1", SenderJID: "20", SenderName: "Bob", Timestamp: now, Text: "hello b1", MessageType: "Message"}
+	msgB2 := Message{SourcePK: 3, ChatJID: "-1002", ChatName: "Chat B", MessageID: "2", SenderJID: "20", SenderName: "Bob", Timestamp: later, Text: "hello b2", MessageType: "Message"}
+
+	initial := ImportStats{SourcePath: "tdata", DBPath: st.Path(), Chats: 2, Messages: 3, StartedAt: now, FinishedAt: now}
+	if err := st.ReplaceAll(ctx, initial,
+		[]Chat{chatA, chatB},
+		[]Folder{{ID: "1", Title: "F1"}, {ID: "2", Title: "F2"}},
+		[]FolderChat{fcA, fcB},
+		[]Topic{topicA, topicB},
+		[]Message{msgA, msgB1, msgB2},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	updatedChatA := Chat{JID: "-1001", Kind: "channel", Name: "Chat A Updated", LastMessageAt: later, UnreadCount: 5, MessageCount: 1, FolderID: "1", Forum: false}
+	updatedMsgA := Message{SourcePK: 4, ChatJID: "-1001", ChatName: "Chat A Updated", MessageID: "2", SenderJID: "10", SenderName: "Alice", Timestamp: later, Text: "updated a", MessageType: "Message", MediaType: "photo", MediaTitle: "pic.jpg"}
+
+	upsertStats := ImportStats{SourcePath: "tdata", DBPath: st.Path(), Chats: 1, Messages: 1, MediaMessages: 1, StartedAt: later, FinishedAt: later}
+	if err := st.UpsertChat(ctx, upsertStats, "-1001",
+		[]Chat{updatedChatA},
+		nil, nil,
+		nil,
+		[]Message{updatedMsgA},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := st.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Chats != 2 {
+		t.Fatalf("chats = %d, want 2 (chat B preserved)", status.Chats)
+	}
+	if status.Messages != 3 {
+		t.Fatalf("messages = %d, want 3 (2 from B + 1 updated A)", status.Messages)
+	}
+	if status.MediaMessages != 1 {
+		t.Fatalf("media_messages = %d, want 1", status.MediaMessages)
+	}
+	if status.LastImportAt != later {
+		t.Fatalf("last_import_at = %v, want %v", status.LastImportAt, later)
+	}
+
+	chats, err := st.ListChats(ctx, 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chats) != 2 {
+		t.Fatalf("chats list = %d, want 2", len(chats))
+	}
+	foundA, foundB := false, false
+	for _, c := range chats {
+		switch c.JID {
+		case "-1001":
+			foundA = true
+			if c.Name != "Chat A Updated" {
+				t.Fatalf("chat A name = %q, want %q", c.Name, "Chat A Updated")
+			}
+		case "-1002":
+			foundB = true
+			if c.Name != "Chat B" {
+				t.Fatalf("chat B name = %q, want %q", c.Name, "Chat B")
+			}
+		}
+	}
+	if !foundA || !foundB {
+		t.Fatalf("missing chats: A=%v B=%v", foundA, foundB)
+	}
+
+	msgAAll, err := st.Messages(ctx, MessageFilter{ChatJID: "-1001", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgAAll) != 1 || msgAAll[0].Text != "updated a" {
+		t.Fatalf("chat A messages = %d (text=%q), want 1 (updated a)", len(msgAAll), msgAAll[0].Text)
+	}
+
+	msgBAll, err := st.Messages(ctx, MessageFilter{ChatJID: "-1002", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgBAll) != 2 {
+		t.Fatalf("chat B messages = %d, want 2 (preserved)", len(msgBAll))
+	}
+
+	folders, err := st.ListFolders(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(folders) != 2 {
+		t.Fatalf("folders = %d, want 2", len(folders))
+	}
+
+	fcs, err := st.ChatsInFolder(ctx, "2", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fcs) != 1 || fcs[0].JID != "-1002" {
+		t.Fatalf("folder 2 chats = %v, want chat B only", fcs)
+	}
+
+	searchA, err := st.Search(ctx, MessageFilter{Query: "updated", ChatJID: "-1001", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(searchA) != 1 {
+		t.Fatalf("FTS 'updated' in chat A = %d, want 1", len(searchA))
+	}
+
+	searchB, err := st.Search(ctx, MessageFilter{Query: "hello", ChatJID: "-1002", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(searchB) != 2 {
+		t.Fatalf("FTS 'hello' in chat B = %d, want 2 (preserved)", len(searchB))
+	}
+
+	searchOld, err := st.Search(ctx, MessageFilter{Query: "hello a", ChatJID: "-1001", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(searchOld) != 0 {
+		t.Fatalf("FTS 'hello a' in chat A = %d, want 0 (old FTS removed)", len(searchOld))
+	}
+
+	var sourcePath string
+	if err := st.db.QueryRowContext(ctx, `select value from sync_state where key='source_path'`).Scan(&sourcePath); err != nil {
+		t.Fatal(err)
+	}
+	if sourcePath != "tdata" {
+		t.Fatalf("source_path = %q, want %q", sourcePath, "tdata")
+	}
+}
