@@ -224,6 +224,7 @@ async def main():
     parser.add_argument("--session", required=True)
     parser.add_argument("--dialogs-limit", type=int, default=200)
     parser.add_argument("--messages-limit", type=int, default=500)
+    parser.add_argument("--chat", default="")
     args = parser.parse_args()
 
     started = datetime.now(timezone.utc)
@@ -235,11 +236,22 @@ async def main():
     if not await client.is_user_authorized():
         raise SystemExit("Telegram session is not authorized")
 
-    dialogs = await client.get_dialogs(limit=None if args.dialogs_limit <= 0 else args.dialogs_limit)
+    if args.chat:
+        chat_id_int = int(args.chat)
+        try:
+            entity = await client.get_entity(chat_id_int)
+        except Exception:
+            raise SystemExit(f"Could not resolve chat: {args.chat}")
+        dialogs = [type('Dialog', (), {'entity': entity, 'id': chat_id_int, 'name': display_name(entity, "")})()]
+    else:
+        dialogs = await client.get_dialogs(limit=None if args.dialogs_limit <= 0 else args.dialogs_limit)
     out_chats = []
     out_messages = []
     out_topics = []
-    out_folders, folder_memberships = await load_folders(client)
+    out_folders = []
+    folder_memberships = {}
+    if not args.chat:
+        out_folders, folder_memberships = await load_folders(client)
     for dialog in dialogs:
         entity = dialog.entity
         chat_id = str(dialog.id)
