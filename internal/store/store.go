@@ -205,6 +205,11 @@ func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID strin
 	}
 	defer rollback(tx)
 	chatID := parseInt64(chatJID)
+	preserveFolderState := len(folders) == 0 && len(folderChats) == 0
+	var existingFolderID string
+	if preserveFolderState {
+		_ = tx.QueryRowContext(ctx, `select coalesce(folder_id,'') from chats where id = ?`, chatID).Scan(&existingFolderID)
+	}
 	for _, q := range []struct {
 		sql  string
 		args []any
@@ -212,16 +217,35 @@ func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID strin
 		{"delete from messages_fts where rowid in (select rowid from messages where chat_jid = ?)", []any{chatJID}},
 		{"delete from messages where chat_jid = ?", []any{chatJID}},
 		{"delete from topics where chat_jid = ?", []any{chatJID}},
-		{"delete from folder_chats where chat_jid = ?", []any{chatJID}},
 		{"delete from chats where id = ?", []any{chatID}},
 	} {
 		if _, err := tx.ExecContext(ctx, q.sql, q.args...); err != nil {
 			return err
 		}
 	}
+	if !preserveFolderState {
+		if _, err := tx.ExecContext(ctx, `delete from folder_chats where chat_jid = ?`, chatJID); err != nil {
+			return err
+		}
+	}
 	for _, c := range chats {
+		if preserveFolderState && c.FolderID == "" {
+			c.FolderID = existingFolderID
+		}
 		if _, err := tx.ExecContext(ctx, `insert into chats(id,kind,name,username,last_message_at,unread_count,message_count,folder_id,forum) values(?,?,?,?,?,?,?,?,?)`,
 			parseInt64(c.JID), c.Kind, c.Name, c.Username, unix(c.LastMessageAt), c.UnreadCount, c.MessageCount, c.FolderID, boolInt(c.Forum)); err != nil {
+			return err
+		}
+	}
+	for _, f := range folders {
+		if _, err := tx.ExecContext(ctx, `insert into folders(id,title,emoticon,color,flags_json) values(?,?,?,?,?) on conflict(id) do update set title=excluded.title, emoticon=excluded.emoticon, color=excluded.color, flags_json=excluded.flags_json`,
+			f.ID, f.Title, f.Emoticon, f.Color, f.FlagsJSON); err != nil {
+			return err
+		}
+	}
+	for _, fc := range folderChats {
+		if _, err := tx.ExecContext(ctx, `insert into folder_chats(folder_id,chat_jid,position) values(?,?,?)`,
+			fc.FolderID, fc.ChatJID, fc.Position); err != nil {
 			return err
 		}
 	}

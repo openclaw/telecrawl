@@ -164,7 +164,7 @@ func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	updatedChatA := Chat{JID: "-1001", Kind: "channel", Name: "Chat A Updated", LastMessageAt: later, UnreadCount: 5, MessageCount: 1, FolderID: "1", Forum: false}
+	updatedChatA := Chat{JID: "-1001", Kind: "channel", Name: "Chat A Updated", LastMessageAt: later, UnreadCount: 5, MessageCount: 1, Forum: false}
 	updatedMsgA := Message{SourcePK: 4, ChatJID: "-1001", ChatName: "Chat A Updated", MessageID: "2", SenderJID: "10", SenderName: "Alice", Timestamp: later, Text: "updated a", MessageType: "Message", MediaType: "photo", MediaTitle: "pic.jpg"}
 
 	upsertStats := ImportStats{SourcePath: "tdata", DBPath: st.Path(), Chats: 1, Messages: 1, MediaMessages: 1, StartedAt: later, FinishedAt: later}
@@ -209,6 +209,9 @@ func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 			if c.Name != "Chat A Updated" {
 				t.Fatalf("chat A name = %q, want %q", c.Name, "Chat A Updated")
 			}
+			if c.FolderID != "1" {
+				t.Fatalf("chat A folder_id = %q, want preserved folder 1", c.FolderID)
+			}
 		case "-1002":
 			foundB = true
 			if c.Name != "Chat B" {
@@ -242,6 +245,14 @@ func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 	}
 	if len(folders) != 2 {
 		t.Fatalf("folders = %d, want 2", len(folders))
+	}
+
+	fcsA, err := st.ChatsInFolder(ctx, "1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fcsA) != 1 || fcsA[0].JID != "-1001" {
+		t.Fatalf("folder 1 chats = %v, want chat A preserved", fcsA)
 	}
 
 	fcs, err := st.ChatsInFolder(ctx, "2", 10)
