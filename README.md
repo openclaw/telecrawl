@@ -1,3 +1,5 @@
+![telecrawl banner](docs/assets/readme-banner.jpg)
+
 # ✈️ telecrawl
 
 Telegram Desktop archive CLI.
