@@ -132,7 +132,7 @@ func Probe(ctx context.Context, opts Options) Report {
 	switch {
 	case report.KeyFiles > 0 && report.PostboxDBs > 0:
 		report.Store = "telegram-macos-postbox"
-		report.Note = "Native Telegram for macOS Postbox data is readable locally; import is offline and does not call Telegram APIs"
+		report.Note = "Native Telegram for macOS Postbox data is readable locally; import archives cached media, and --fetch-media can fetch missing cloud media from the existing native session"
 	case report.SQLiteFiles > 0:
 		report.Store = "sqlite"
 	case report.TDesktopFiles > 0:

@@ -21,13 +21,17 @@ type Store struct {
 }
 
 type ImportStats struct {
-	SourcePath    string    `json:"source_path"`
-	DBPath        string    `json:"db_path"`
-	Chats         int       `json:"chats"`
-	Messages      int       `json:"messages"`
-	MediaMessages int       `json:"media_messages"`
-	StartedAt     time.Time `json:"started_at"`
-	FinishedAt    time.Time `json:"finished_at"`
+	SourcePath           string    `json:"source_path"`
+	DBPath               string    `json:"db_path"`
+	Chats                int       `json:"chats"`
+	Messages             int       `json:"messages"`
+	MediaMessages        int       `json:"media_messages"`
+	MediaFiles           int       `json:"media_files"`
+	MediaBytes           int64     `json:"media_bytes"`
+	RemoteMediaDownloads int       `json:"remote_media_downloads,omitempty"`
+	RemoteMediaMissing   int       `json:"remote_media_missing,omitempty"`
+	StartedAt            time.Time `json:"started_at"`
+	FinishedAt           time.Time `json:"finished_at"`
 }
 
 type Status struct {

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,7 @@ type ImportOptions struct {
 	DialogsLimit  int
 	MessagesLimit int
 	ChatID        string
+	FetchMedia    bool
 }
 
 type ImportResult struct {
@@ -42,10 +44,14 @@ type ImportResult struct {
 }
 
 type pyResult struct {
-	SourcePath string `json:"source_path"`
-	StartedAt  string `json:"started_at"`
-	FinishedAt string `json:"finished_at"`
-	Chats      []struct {
+	SourcePath  string `json:"source_path"`
+	StartedAt   string `json:"started_at"`
+	FinishedAt  string `json:"finished_at"`
+	RemoteMedia struct {
+		Downloaded int `json:"downloaded"`
+		Missing    int `json:"missing"`
+	} `json:"remote_media"`
+	Chats []struct {
 		ID            string `json:"id"`
 		Kind          string `json:"kind"`
 		Name          string `json:"name"`
@@ -101,6 +107,7 @@ type pyResult struct {
 		MessageType      string `json:"message_type"`
 		MediaType        string `json:"media_type"`
 		MediaTitle       string `json:"media_title"`
+		MediaPath        string `json:"media_path"`
 		MediaSize        int64  `json:"media_size"`
 		Views            int    `json:"views"`
 		Forwards         int    `json:"forwards"`
@@ -123,14 +130,30 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 			"--dialogs-limit", fmt.Sprint(opts.DialogsLimit),
 			"--messages-limit", fmt.Sprint(opts.MessagesLimit),
 		}
+		if opts.FetchMedia {
+			mediaTempDir, err := os.MkdirTemp("", "telecrawl-postbox-media-*")
+			if err != nil {
+				return ImportResult{}, err
+			}
+			defer func() { _ = os.RemoveAll(mediaTempDir) }()
+			args = append(args, "--fetch-media", "--media-output-dir", mediaTempDir)
+		}
 		if opts.ChatID != "" {
 			args = append(args, "--chat", opts.ChatID)
 		}
-		raw, err := runPythonImporter(ctx, python, "import_postbox.py", importPostboxScript, args, "pycryptodomex sqlcipher3")
+		deps := "pycryptodomex sqlcipher3"
+		if opts.FetchMedia {
+			deps += " telethon"
+		}
+		raw, err := runPythonImporter(ctx, python, "import_postbox.py", importPostboxScript, args, deps)
 		if err != nil {
 			return ImportResult{}, err
 		}
-		return decodeImportResult(raw, dbPath), nil
+		result := decodeImportResult(raw, dbPath)
+		if err := copyImportedMedia(result.Messages, mediaArchiveDir(dbPath), &result.Stats); err != nil {
+			return ImportResult{}, err
+		}
+		return result, nil
 	}
 
 	session := strings.TrimSpace(opts.Session)
@@ -146,6 +169,14 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 		"--dialogs-limit", fmt.Sprint(opts.DialogsLimit),
 		"--messages-limit", fmt.Sprint(opts.MessagesLimit),
 	}
+	if opts.FetchMedia {
+		mediaTempDir, err := os.MkdirTemp("", "telecrawl-tdata-media-*")
+		if err != nil {
+			return ImportResult{}, err
+		}
+		defer func() { _ = os.RemoveAll(mediaTempDir) }()
+		args = append(args, "--fetch-media", "--media-output-dir", mediaTempDir)
+	}
 	if opts.ChatID != "" {
 		args = append(args, "--chat", opts.ChatID)
 	}
@@ -153,7 +184,11 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 	if err != nil {
 		return ImportResult{}, err
 	}
-	return decodeImportResult(raw, dbPath), nil
+	result := decodeImportResult(raw, dbPath)
+	if err := copyImportedMedia(result.Messages, mediaArchiveDir(dbPath), &result.Stats); err != nil {
+		return ImportResult{}, err
+	}
+	return result, nil
 }
 
 type importSource struct {
@@ -214,7 +249,14 @@ func decodeImportResult(raw pyResult, dbPath string) ImportResult {
 	result := ImportResult{}
 	started := parseTime(raw.StartedAt)
 	finished := parseTime(raw.FinishedAt)
-	result.Stats = store.ImportStats{SourcePath: raw.SourcePath, DBPath: dbPath, StartedAt: started, FinishedAt: finished}
+	result.Stats = store.ImportStats{
+		SourcePath:           raw.SourcePath,
+		DBPath:               dbPath,
+		RemoteMediaDownloads: raw.RemoteMedia.Downloaded,
+		RemoteMediaMissing:   raw.RemoteMedia.Missing,
+		StartedAt:            started,
+		FinishedAt:           finished,
+	}
 	for _, c := range raw.Chats {
 		result.Chats = append(result.Chats, store.Chat{
 			JID:           c.ID,
@@ -280,6 +322,7 @@ func decodeImportResult(raw pyResult, dbPath string) ImportResult {
 			MessageType:   m.MessageType,
 			MediaType:     m.MediaType,
 			MediaTitle:    m.MediaTitle,
+			MediaPath:     m.MediaPath,
 			MediaSize:     m.MediaSize,
 			Views:         m.Views,
 			Forwards:      m.Forwards,
@@ -329,6 +372,96 @@ func resolvePython(configured string) (string, error) {
 func defaultSessionPath(dbPath string) string {
 	sum := sha256.Sum256([]byte(dbPath))
 	return filepath.Join(defaultBaseDir(), "sessions", fmt.Sprintf("tdata-%x.session", sum[:6]))
+}
+
+func mediaArchiveDir(dbPath string) string {
+	return filepath.Join(filepath.Dir(dbPath), "media")
+}
+
+func copyImportedMedia(messages []store.Message, archiveDir string, stats *store.ImportStats) error {
+	type archivedMedia struct {
+		path string
+		size int64
+	}
+	copiedSources := make(map[string]archivedMedia)
+	archivedFiles := make(map[string]int64)
+	for i := range messages {
+		sourcePath := strings.TrimSpace(messages[i].MediaPath)
+		if sourcePath == "" {
+			continue
+		}
+		archived, ok := copiedSources[sourcePath]
+		if !ok {
+			archivedPath, size, err := copyMediaFile(sourcePath, archiveDir)
+			if err != nil {
+				return err
+			}
+			archived = archivedMedia{path: archivedPath, size: size}
+			copiedSources[sourcePath] = archived
+		}
+		messages[i].MediaPath = archived.path
+		messages[i].MediaSize = archived.size
+		if _, ok := archivedFiles[archived.path]; !ok {
+			archivedFiles[archived.path] = archived.size
+		}
+	}
+	if stats != nil {
+		for _, size := range archivedFiles {
+			stats.MediaFiles++
+			stats.MediaBytes += size
+		}
+	}
+	return nil
+}
+
+func copyMediaFile(sourcePath, archiveDir string) (string, int64, error) {
+	if err := os.MkdirAll(archiveDir, 0o700); err != nil {
+		return "", 0, fmt.Errorf("mkdir media archive: %w", err)
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return "", 0, fmt.Errorf("open media %s: %w", sourcePath, err)
+	}
+	defer func() { _ = source.Close() }()
+
+	tmp, err := os.CreateTemp(archiveDir, ".media-*")
+	if err != nil {
+		return "", 0, fmt.Errorf("create media temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	hash := sha256.New()
+	size, copyErr := io.Copy(io.MultiWriter(tmp, hash), source)
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		return "", 0, fmt.Errorf("copy media %s: %w", sourcePath, copyErr)
+	}
+	if closeErr != nil {
+		return "", 0, fmt.Errorf("close media temp: %w", closeErr)
+	}
+
+	digest := fmt.Sprintf("%x", hash.Sum(nil))
+	finalDir := filepath.Join(archiveDir, digest[:2])
+	if err := os.MkdirAll(finalDir, 0o700); err != nil {
+		return "", 0, fmt.Errorf("mkdir media shard: %w", err)
+	}
+	finalPath := filepath.Join(finalDir, digest)
+	if _, err := os.Stat(finalPath); err == nil {
+		return finalPath, size, nil
+	} else if !os.IsNotExist(err) {
+		return "", 0, fmt.Errorf("stat media archive: %w", err)
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		return "", 0, fmt.Errorf("archive media %s: %w", sourcePath, err)
+	}
+	removeTemp = false
+	return finalPath, size, nil
 }
 
 func defaultBaseDir() string {
