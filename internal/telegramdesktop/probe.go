@@ -24,6 +24,8 @@ type Report struct {
 	Store         string   `json:"store"`
 	SQLiteFiles   int      `json:"sqlite_files"`
 	TDesktopFiles int      `json:"tdesktop_files"`
+	KeyFiles      int      `json:"key_files,omitempty"`
+	PostboxDBs    int      `json:"postbox_dbs,omitempty"`
 	AccountDirs   int      `json:"account_dirs,omitempty"`
 	FilesScanned  int      `json:"files_scanned"`
 	BytesScanned  int64    `json:"bytes_scanned"`
@@ -57,10 +59,15 @@ func DefaultPath() string {
 	}
 }
 
+func DefaultPostboxPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "Group Containers", "6N38VWS5BX.ru.keepcoder.Telegram")
+}
+
 func Probe(ctx context.Context, opts Options) Report {
 	path := strings.TrimSpace(opts.Path)
 	if path == "" {
-		path = DefaultPath()
+		path = defaultProbePath()
 	}
 	report := Report{Path: path, Store: "missing"}
 	info, err := os.Stat(path)
@@ -108,6 +115,10 @@ func Probe(ctx context.Context, opts Options) Report {
 			report.SQLiteFiles++
 		case "tdesktop":
 			report.TDesktopFiles++
+		case "postbox-key":
+			report.KeyFiles++
+		case "postbox-db":
+			report.PostboxDBs++
 		}
 		if len(report.Samples) < 8 {
 			report.Samples = append(report.Samples, Sample{Path: p, Kind: kind, Size: info.Size()})
@@ -119,6 +130,9 @@ func Probe(ctx context.Context, opts Options) Report {
 	}
 	report.Accessible = report.FilesScanned > 0 && report.Error == ""
 	switch {
+	case report.KeyFiles > 0 && report.PostboxDBs > 0:
+		report.Store = "telegram-macos-postbox"
+		report.Note = "Native Telegram for macOS Postbox data is readable locally; import is offline and does not call Telegram APIs"
 	case report.SQLiteFiles > 0:
 		report.Store = "sqlite"
 	case report.TDesktopFiles > 0:
@@ -130,6 +144,64 @@ func Probe(ctx context.Context, opts Options) Report {
 		report.Store = "empty"
 	}
 	return report
+}
+
+func defaultProbePath() string {
+	tdesktop := DefaultPath()
+	if info, err := os.Stat(tdesktop); err == nil && info.IsDir() {
+		return tdesktop
+	}
+	postbox := DefaultPostboxPath()
+	if info, err := os.Stat(postbox); err == nil && info.IsDir() {
+		return postbox
+	}
+	return tdesktop
+}
+
+func LooksLikePostbox(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = DefaultPostboxPath()
+	}
+	root := filepath.Clean(path)
+	if hasPostboxAccount(root) && fileExists(filepath.Join(filepath.Dir(root), ".tempkeyEncrypted")) {
+		return true
+	}
+	if hasPostboxLane(root) {
+		return true
+	}
+	for _, name := range []string{"stable", "appstore"} {
+		if hasPostboxLane(filepath.Join(root, name)) {
+			return true
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && hasPostboxLane(filepath.Join(root, entry.Name())) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPostboxLane(path string) bool {
+	if !fileExists(filepath.Join(path, ".tempkeyEncrypted")) {
+		return false
+	}
+	matches, err := filepath.Glob(filepath.Join(path, "account-*", "postbox", "db", "db_sqlite"))
+	return err == nil && len(matches) > 0
+}
+
+func hasPostboxAccount(path string) bool {
+	return fileExists(filepath.Join(path, "postbox", "db", "db_sqlite"))
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func sniffFile(path string) (string, bool) {
@@ -145,6 +217,10 @@ func sniffFile(path string) (string, bool) {
 	}
 	buf := header[:n]
 	switch {
+	case filepath.Base(path) == ".tempkeyEncrypted":
+		return "postbox-key", true
+	case filepath.Base(path) == "db_sqlite" && filepath.Base(filepath.Dir(path)) == "db" && filepath.Base(filepath.Dir(filepath.Dir(path))) == "postbox":
+		return "postbox-db", true
 	case bytes.HasPrefix(buf, []byte("SQLite format 3")):
 		return "sqlite", true
 	case bytes.HasPrefix(buf, []byte("TDF$")), bytes.HasPrefix(buf, []byte("TDDF")):
@@ -159,6 +235,14 @@ func errorsIsEOF(err error) bool {
 }
 
 func isLikelyAccountDir(name string) bool {
+	if strings.HasPrefix(name, "account-") && len(name) > len("account-") {
+		for _, r := range strings.TrimPrefix(name, "account-") {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		return true
+	}
 	if len(name) != 16 {
 		return false
 	}

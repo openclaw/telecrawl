@@ -20,6 +20,9 @@ import (
 //go:embed scripts/import_tdata.py
 var importScript string
 
+//go:embed scripts/import_postbox.py
+var importPostboxScript string
+
 type ImportOptions struct {
 	Path          string
 	Python        string
@@ -109,14 +112,27 @@ type pyResult struct {
 }
 
 func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResult, error) {
-	tdata := strings.TrimSpace(opts.Path)
-	if tdata == "" {
-		tdata = DefaultPath()
-	}
 	python, err := resolvePython(opts.Python)
 	if err != nil {
 		return ImportResult{}, err
 	}
+	source := resolveImportSource(strings.TrimSpace(opts.Path))
+	if source.postbox {
+		args := []string{
+			"--source", source.path,
+			"--dialogs-limit", fmt.Sprint(opts.DialogsLimit),
+			"--messages-limit", fmt.Sprint(opts.MessagesLimit),
+		}
+		if opts.ChatID != "" {
+			args = append(args, "--chat", opts.ChatID)
+		}
+		raw, err := runPythonImporter(ctx, python, "import_postbox.py", importPostboxScript, args, "pycryptodomex sqlcipher3")
+		if err != nil {
+			return ImportResult{}, err
+		}
+		return decodeImportResult(raw, dbPath), nil
+	}
+
 	session := strings.TrimSpace(opts.Session)
 	if session == "" {
 		session = defaultSessionPath(dbPath)
@@ -124,15 +140,8 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 	if err := os.MkdirAll(filepath.Dir(session), 0o700); err != nil {
 		return ImportResult{}, err
 	}
-	script, cleanup, err := writeTempScript()
-	if err != nil {
-		return ImportResult{}, err
-	}
-	defer cleanup()
-
 	args := []string{
-		script,
-		"--tdata", tdata,
+		"--tdata", source.path,
 		"--session", session,
 		"--dialogs-limit", fmt.Sprint(opts.DialogsLimit),
 		"--messages-limit", fmt.Sprint(opts.MessagesLimit),
@@ -140,24 +149,68 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 	if opts.ChatID != "" {
 		args = append(args, "--chat", opts.ChatID)
 	}
-	cmd := exec.CommandContext(ctx, python, args...) // #nosec G204 -- python and args are explicit CLI configuration.
+	raw, err := runPythonImporter(ctx, python, "import_tdata.py", importScript, args, "opentele2 telethon")
+	if err != nil {
+		return ImportResult{}, err
+	}
+	return decodeImportResult(raw, dbPath), nil
+}
+
+type importSource struct {
+	path    string
+	postbox bool
+}
+
+func resolveImportSource(path string) importSource {
+	return resolveImportSourcePaths(path, DefaultPath(), DefaultPostboxPath())
+}
+
+func resolveImportSourcePaths(path, tdesktop, postbox string) importSource {
+	if path != "" {
+		return importSource{path: path, postbox: LooksLikePostbox(path)}
+	}
+	if info, err := os.Stat(tdesktop); err == nil && info.IsDir() {
+		return importSource{path: tdesktop}
+	}
+	if info, err := os.Stat(postbox); err == nil && info.IsDir() {
+		return importSource{path: postbox, postbox: true}
+	}
+	return importSource{path: tdesktop}
+}
+
+func runPythonImporter(ctx context.Context, python, scriptName, scriptContent string, args []string, deps string) (pyResult, error) {
+	script, cleanup, err := writeTempScript(scriptName, scriptContent)
+	if err != nil {
+		return pyResult{}, err
+	}
+	defer cleanup()
+
+	argv := append([]string{script}, args...)
+	cmd := exec.CommandContext(ctx, python, argv...) // #nosec G204 -- python and args are explicit CLI configuration.
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
+		if strings.Contains(msg, "missing dependency:") {
+			return pyResult{}, fmt.Errorf("python dependency missing: run `%s -m pip install %s`: %s", python, deps, msg)
+		}
 		if strings.Contains(msg, "ModuleNotFoundError") || strings.Contains(msg, "No module named") {
-			return ImportResult{}, fmt.Errorf("python dependency missing: run `%s -m pip install opentele2 telethon`: %s", python, msg)
+			return pyResult{}, fmt.Errorf("python dependency missing: run `%s -m pip install %s`: %s", python, deps, msg)
 		}
 		if msg != "" {
-			return ImportResult{}, fmt.Errorf("telegram import failed: %w: %s", err, msg)
+			return pyResult{}, fmt.Errorf("telegram import failed: %w: %s", err, msg)
 		}
-		return ImportResult{}, fmt.Errorf("telegram import failed: %w", err)
+		return pyResult{}, fmt.Errorf("telegram import failed: %w", err)
 	}
 	var raw pyResult
 	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
-		return ImportResult{}, fmt.Errorf("decode importer output: %w", err)
+		return pyResult{}, fmt.Errorf("decode importer output: %w", err)
 	}
+	return raw, nil
+}
+
+func decodeImportResult(raw pyResult, dbPath string) ImportResult {
 	result := ImportResult{}
 	started := parseTime(raw.StartedAt)
 	finished := parseTime(raw.FinishedAt)
@@ -242,7 +295,7 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 	}
 	result.Stats.Chats = len(result.Chats)
 	result.Stats.Messages = len(result.Messages)
-	return result, nil
+	return result
 }
 
 func resolvePython(configured string) (string, error) {
@@ -283,13 +336,13 @@ func defaultBaseDir() string {
 	return filepath.Join(home, ".telecrawl")
 }
 
-func writeTempScript() (string, func(), error) {
+func writeTempScript(name, content string) (string, func(), error) {
 	dir, err := os.MkdirTemp("", "telecrawl-import-*")
 	if err != nil {
 		return "", func() {}, err
 	}
-	path := filepath.Join(dir, "import_tdata.py")
-	if err := os.WriteFile(path, []byte(importScript), 0o600); err != nil {
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		_ = os.RemoveAll(dir)
 		return "", func() {}, err
 	}
