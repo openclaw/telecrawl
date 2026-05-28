@@ -2,11 +2,12 @@
 
 ![telecrawl banner](docs/assets/readme-banner.jpg)
 
-Telegram Desktop archive CLI.
+Telegram archive CLI.
 
-`telecrawl` reads your local Telegram Desktop `tdata` through `opentele2` and
-Telethon, stores a searchable SQLite archive in `~/.telecrawl/telecrawl.db`, and
-can back it up to GitHub as encrypted age shards.
+`telecrawl` reads local Telegram Desktop `tdata` archives and native Telegram
+for macOS Postbox databases, stores a searchable SQLite archive in
+`~/.telecrawl/telecrawl.db`, and can back it up to GitHub as encrypted age
+shards.
 
 It is local-first:
 
@@ -40,13 +41,16 @@ The image packages the Python bridge dependencies. Mount Telegram Desktop `tdata
 
 ## Setup
 
-Install the Python bridge used for Telegram Desktop `tdata` imports:
+Install the Python bridge dependencies used for local Telegram imports:
 
 ```bash
 telecrawl deps install
 ```
 
-This creates `~/.telecrawl/venv` and installs `opentele2` plus Telethon.
+This creates `~/.telecrawl/venv` and installs the bridge packages for Telegram
+Desktop `tdata`. It also attempts the optional native macOS Postbox SQLCipher
+binding when the host has the required native SQLCipher support. The Docker image
+packages both the Python bridge and native SQLCipher dependencies.
 
 ## Import
 
@@ -66,6 +70,18 @@ Use `0` for no limit:
 ```bash
 telecrawl import --dialogs-limit 0 --messages-limit 0
 ```
+
+When no `--source` is provided on macOS, `telecrawl` checks Telegram Desktop
+`tdata` first, then the native Telegram for macOS group container. No backend
+flag is needed. To import a copied archive directly:
+
+```bash
+telecrawl import --path "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram"
+```
+
+Native macOS imports include every local `account-*` database they find; if more
+than one account is present, stored chat and sender IDs are account-scoped to
+avoid collisions.
 
 Useful reads:
 
@@ -101,6 +117,8 @@ telecrawl --json search "invoice"
 Defaults:
 
 - Telegram Desktop source: `~/Library/Application Support/Telegram Desktop/tdata`
+- native macOS Postbox source:
+  `~/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram`
 - archive DB: `~/.telecrawl/telecrawl.db`
 - Python bridge venv: `~/.telecrawl/venv`
 - Telethon sessions: `~/.telecrawl/sessions/`
@@ -114,11 +132,12 @@ Override the archive DB:
 telecrawl --db /tmp/telecrawl.db status
 ```
 
-Override the Telegram Desktop source:
+Override the Telegram source:
 
 ```bash
 telecrawl --source "/path/to/tdata" doctor
 telecrawl --source "/path/to/tdata" import
+telecrawl --source "/path/to/6N38VWS5BX.ru.keepcoder.Telegram" import
 ```
 
 ## Backup

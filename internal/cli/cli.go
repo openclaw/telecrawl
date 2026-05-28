@@ -119,7 +119,15 @@ func (r *runtime) dispatch(args []string) error {
 }
 
 func (r *runtime) runDeps(args []string) error {
-	if len(args) != 1 || args[0] != "install" {
+	if len(args) == 0 || args[0] != "install" {
+		return usageErr(errors.New("usage: telecrawl deps install"))
+	}
+	fs := flag.NewFlagSet("telecrawl deps install", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args[1:]); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() != 0 {
 		return usageErr(errors.New("usage: telecrawl deps install"))
 	}
 	venv := filepath.Join(defaultBaseDir(), "venv")
@@ -142,10 +150,25 @@ func (r *runtime) runDeps(args []string) error {
 	if err := runLogged(r.ctx, r.stderr, pipPython, "-m", "pip", "install", "--upgrade", "pip"); err != nil {
 		return err
 	}
-	if err := runLogged(r.ctx, r.stderr, pipPython, "-m", "pip", "install", "opentele2", "telethon"); err != nil {
+	installArgs := append([]string{"-m", "pip", "install"}, depsInstallPackages()...)
+	if err := runLogged(r.ctx, r.stderr, pipPython, installArgs...); err != nil {
 		return err
 	}
-	return r.print(map[string]any{"python": pipPython, "installed": true})
+	postboxDepsInstalled := true
+	postboxInstallArgs := append([]string{"-m", "pip", "install"}, postboxDepsInstallPackages()...)
+	if err := runLogged(r.ctx, r.stderr, pipPython, postboxInstallArgs...); err != nil {
+		postboxDepsInstalled = false
+		_, _ = fmt.Fprintf(r.stderr, "warning: optional native macOS Postbox dependency install failed: %v\n", err)
+	}
+	return r.print(map[string]any{"python": pipPython, "installed": true, "postbox_dependencies": postboxDepsInstalled})
+}
+
+func depsInstallPackages() []string {
+	return []string{"opentele2", "telethon"}
+}
+
+func postboxDepsInstallPackages() []string {
+	return []string{"pycryptodomex", "sqlcipher3"}
 }
 
 func (r *runtime) withStore(fn func(*store.Store) error) error {
@@ -207,17 +230,52 @@ func (r *runtime) runImport(args []string) error {
 		if err != nil {
 			return err
 		}
-		if *chat != "" {
-			if err := st.UpsertChat(r.ctx, result.Stats, *chat, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages); err != nil {
-				return err
-			}
-		} else {
-			if err := st.ReplaceAll(r.ctx, result.Stats, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages); err != nil {
-				return err
-			}
+		if err := storeImportResult(r.ctx, st, result, *chat); err != nil {
+			return err
 		}
 		return r.print(result.Stats)
 	})
+}
+
+func storeImportResult(ctx context.Context, st *store.Store, result telegramdesktop.ImportResult, chatFilter string) error {
+	if strings.TrimSpace(chatFilter) == "" {
+		return st.ReplaceAll(ctx, result.Stats, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages)
+	}
+	if len(result.Chats) == 0 {
+		return fmt.Errorf("telegram import returned no chats for --chat %s", chatFilter)
+	}
+	for _, chat := range result.Chats {
+		partial := importResultForChat(result, chat.JID)
+		if err := st.UpsertChat(ctx, partial.Stats, chat.JID, partial.Chats, partial.Folders, partial.FolderChats, partial.Topics, partial.Messages); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func importResultForChat(result telegramdesktop.ImportResult, chatJID string) telegramdesktop.ImportResult {
+	out := telegramdesktop.ImportResult{Stats: result.Stats, Folders: result.Folders}
+	for _, chat := range result.Chats {
+		if chat.JID == chatJID {
+			out.Chats = append(out.Chats, chat)
+		}
+	}
+	for _, folderChat := range result.FolderChats {
+		if folderChat.ChatJID == chatJID {
+			out.FolderChats = append(out.FolderChats, folderChat)
+		}
+	}
+	for _, topic := range result.Topics {
+		if topic.ChatJID == chatJID {
+			out.Topics = append(out.Topics, topic)
+		}
+	}
+	for _, message := range result.Messages {
+		if message.ChatJID == chatJID {
+			out.Messages = append(out.Messages, message)
+		}
+	}
+	return out
 }
 
 func (r *runtime) runChats(args []string) error {
@@ -473,6 +531,16 @@ func (r *runtime) printProbe(report telegramdesktop.Report) error {
 	if _, err := fmt.Fprintf(r.stdout, "tdesktop_files: %d\n", report.TDesktopFiles); err != nil {
 		return err
 	}
+	if report.KeyFiles > 0 {
+		if _, err := fmt.Fprintf(r.stdout, "key_files: %d\n", report.KeyFiles); err != nil {
+			return err
+		}
+	}
+	if report.PostboxDBs > 0 {
+		if _, err := fmt.Fprintf(r.stdout, "postbox_dbs: %d\n", report.PostboxDBs); err != nil {
+			return err
+		}
+	}
 	if _, err := fmt.Fprintf(r.stdout, "files_scanned: %d\n", report.FilesScanned); err != nil {
 		return err
 	}
@@ -562,7 +630,7 @@ usage:
   telecrawl version
 
 notes:
-  import uses Telegram Desktop tdata via opentele2/Telethon
+  import auto-detects Telegram Desktop tdata or native macOS Postbox data
   backup writes encrypted age shards to a git repo
 `)
 }
