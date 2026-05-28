@@ -8,6 +8,7 @@ The format follows Keep a Changelog, and this project uses Semantic Versioning.
 
 ### Added
 
+- Add `import --chat ID` for targeted single-chat imports while preserving unrelated archive data. (#1; thanks @nullyn)
 - Add `metadata --json` crawlkit control metadata for schedulers and local automation.
 - Docker: add a local image with packaged Python bridge dependencies, `/data` persistence, read-only `tdata` mounting docs, and Docker CI smoke coverage.
 - Archive Telegram dialog folders and forum topics, with CLI reads via
