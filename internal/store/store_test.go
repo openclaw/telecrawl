@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -136,6 +137,74 @@ func openTestStore(t *testing.T, path string) *Store {
 		}
 	})
 	return st
+}
+
+func TestOpenMigratesSchema2MessageMetadataColumns(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "schema2.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+create table messages (
+	rowid integer primary key autoincrement,
+	source_pk integer not null unique,
+	chat_jid text not null,
+	chat_name text,
+	msg_id text not null,
+	sender_jid text,
+	sender_name text,
+	ts integer not null,
+	from_me integer not null,
+	text text,
+	raw_type integer not null default 0,
+	message_type text,
+	media_type text,
+	media_title text,
+	media_path text,
+	media_url text,
+	media_size integer,
+	starred integer not null default 0,
+	topic_id text,
+	reply_to_msg_id text,
+	reply_to_chat_jid text,
+	thread_id text,
+	edit_ts integer,
+	forward_json text,
+	reactions_json text,
+	views integer not null default 0,
+	forwards integer not null default 0,
+	replies_count integer not null default 0,
+	pinned integer not null default 0
+);
+pragma user_version = 2;
+`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st := openTestStore(t, path)
+	cols, err := columns(ctx, st.db, "messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"metadata_type", "metadata_title", "metadata_url", "metadata_json"} {
+		if !cols[name] {
+			t.Fatalf("missing migrated column %q", name)
+		}
+	}
+	var version int
+	if err := st.db.QueryRowContext(ctx, "pragma user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", version, schemaVersion)
+	}
 }
 
 func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
