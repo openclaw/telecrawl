@@ -63,6 +63,10 @@ func TestSnapshotRoundTripPreservesTelegramStructure(t *testing.T) {
 			MediaType:     "webpage",
 			MediaTitle:    "GitHub",
 			MediaSize:     123,
+			MetadataType:  "web_page",
+			MetadataTitle: "GitHub",
+			MetadataURL:   "https://github.com/openclaw/telecrawl",
+			MetadataJSON:  `{"url":"https://github.com/openclaw/telecrawl"}`,
 			ForwardJSON:   `{"from_name":"someone"}`,
 			ReactionsJSON: `{"results":[]}`,
 			Views:         10,
@@ -89,7 +93,6 @@ func TestSnapshotRoundTripPreservesTelegramStructure(t *testing.T) {
 	if got := len(exported.Topics); got != 1 {
 		t.Fatalf("topics = %d, want 1", got)
 	}
-
 	restored := openTestStore(t, filepath.Join(t.TempDir(), "restored.db"))
 	if err := restored.ImportSnapshot(ctx, exported, "backup", now); err != nil {
 		t.Fatal(err)
@@ -116,7 +119,7 @@ func TestSnapshotRoundTripPreservesTelegramStructure(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(messages))
 	}
 	msg := messages[0]
-	if msg.ReplyToID != "17" || msg.ReactionsJSON == "" || msg.ForwardJSON == "" || msg.Views != 10 || !msg.Pinned {
+	if msg.ReplyToID != "17" || msg.ReactionsJSON == "" || msg.ForwardJSON == "" || msg.Views != 10 || !msg.Pinned || msg.MetadataType != "web_page" || msg.MetadataURL == "" {
 		t.Fatalf("message metadata lost: %#v", msg)
 	}
 }
@@ -154,7 +157,8 @@ func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 	msgB2 := Message{SourcePK: 3, ChatJID: "-1002", ChatName: "Chat B", MessageID: "2", SenderJID: "20", SenderName: "Bob", Timestamp: later, Text: "hello b2", MessageType: "Message"}
 
 	initial := ImportStats{SourcePath: "tdata", DBPath: st.Path(), Chats: 2, Messages: 3, StartedAt: now, FinishedAt: now}
-	if err := st.ReplaceAll(ctx, initial,
+	if err := st.ReplaceAll(
+		ctx, initial,
 		[]Chat{chatA, chatB},
 		[]Folder{{ID: "1", Title: "F1"}, {ID: "2", Title: "F2"}},
 		[]FolderChat{fcA, fcB},
@@ -168,7 +172,8 @@ func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 	updatedMsgA := Message{SourcePK: 4, ChatJID: "-1001", ChatName: "Chat A Updated", MessageID: "2", SenderJID: "10", SenderName: "Alice", Timestamp: later, Text: "updated a", MessageType: "Message", MediaType: "photo", MediaTitle: "pic.jpg"}
 
 	upsertStats := ImportStats{SourcePath: "tdata", DBPath: st.Path(), Chats: 1, Messages: 1, MediaMessages: 1, StartedAt: later, FinishedAt: later}
-	if err := st.UpsertChat(ctx, upsertStats, "-1001",
+	if err := st.UpsertChat(
+		ctx, upsertStats, "-1001",
 		[]Chat{updatedChatA},
 		nil, nil,
 		nil,

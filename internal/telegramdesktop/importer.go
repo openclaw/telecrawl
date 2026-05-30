@@ -124,6 +124,10 @@ type pyResult struct {
 		MediaTitle       string `json:"media_title"`
 		MediaPath        string `json:"media_path"`
 		MediaSize        int64  `json:"media_size"`
+		MetadataType     string `json:"metadata_type"`
+		MetadataTitle    string `json:"metadata_title"`
+		MetadataURL      string `json:"metadata_url"`
+		MetadataJSON     string `json:"metadata_json"`
 		Views            int    `json:"views"`
 		Forwards         int    `json:"forwards"`
 		RepliesCount     int    `json:"replies_count"`
@@ -410,6 +414,10 @@ func decodeImportResult(raw pyResult, dbPath string) ImportResult {
 			MediaTitle:    m.MediaTitle,
 			MediaPath:     m.MediaPath,
 			MediaSize:     m.MediaSize,
+			MetadataType:  m.MetadataType,
+			MetadataTitle: m.MetadataTitle,
+			MetadataURL:   m.MetadataURL,
+			MetadataJSON:  m.MetadataJSON,
 			Views:         m.Views,
 			Forwards:      m.Forwards,
 			RepliesCount:  m.RepliesCount,
