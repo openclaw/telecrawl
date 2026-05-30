@@ -22,6 +22,7 @@ import importlib
 import io
 import json
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -49,6 +50,11 @@ RESOURCE_TYPE_CLOUD_DOCUMENT_SIZE = -2129249780
 RESOURCE_TYPE_CLOUD_DOCUMENT = 486562374
 RESOURCE_TYPE_LOCAL_FILE = 711798229
 RESOURCE_TYPE_LOCAL_FILE_REFERENCE = 1868491758
+MESSAGE_METADATA_SERVICE_ACTION = -1132984447
+MESSAGE_METADATA_LOCATION = -1138242673
+MESSAGE_METADATA_POLL = -165764138
+MESSAGE_METADATA_WEBPAGE = -661322156
+URL_RE = re.compile(r"https?://[^\s<>()\"']+")
 # Public Telegram for macOS app identity from TelegramSwift.
 TELEGRAM_MAC_API_ID = 9
 TELEGRAM_MAC_API_HASH = "3975f648bb682ee889f35483bc618d1c"  # gitleaks:allow
@@ -412,6 +418,12 @@ def peer_display(peer: Any) -> str:
     return ""
 
 
+def clean_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def peer_access_hash(peer: Any) -> int:
     if not isinstance(peer, dict):
         return 0
@@ -679,6 +691,90 @@ def media_title_for(msg: dict[str, Any]) -> str:
     return ""
 
 
+def json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): json_safe(nested) for key, nested in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, list):
+        return [json_safe(nested) for nested in value]
+    if isinstance(value, tuple):
+        return [json_safe(nested) for nested in value]
+    if isinstance(value, bytes):
+        return {"base64": base64.b64encode(value).decode("ascii")}
+    return value
+
+
+def metadata_json(value: Any) -> str:
+    return json.dumps(json_safe(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def first_string(value: Any, keys: Iterable[str]) -> str:
+    if not isinstance(value, dict):
+        return ""
+    for key in keys:
+        text = clean_text(value.get(key))
+        if text:
+            return text
+    return ""
+
+
+def first_url(text: str) -> str:
+    match = URL_RE.search(text or "")
+    if not match:
+        return ""
+    return match.group(0).rstrip(".,;:")
+
+
+def service_action_title(value: dict[str, Any]) -> str:
+    if any(key in value for key in ("d", "dr", "vc")):
+        return "call"
+    if "t" in value:
+        return "title_change"
+    if "m" in value:
+        return "member_change"
+    if "p" in value:
+        return "pin"
+    return "service_action"
+
+
+def message_metadata(msg: dict[str, Any]) -> tuple[str, str, str, str]:
+    for item in msg.get("embedded_media") or []:
+        if not isinstance(item, dict):
+            continue
+        type_hash = item.get("@type")
+        if type_hash == MESSAGE_METADATA_WEBPAGE:
+            url = first_string(item, ("u", "du", "url"))
+            title = first_string(item, ("ti", "title", "t", "tx"))
+            return "web_page", title, url, metadata_json(item)
+        if type_hash == MESSAGE_METADATA_LOCATION:
+            title = first_string(item, ("adr", "t", "title"))
+            return "location", title, "", metadata_json(item)
+        if type_hash == MESSAGE_METADATA_POLL:
+            title = first_string(item, ("t", "title"))
+            return "poll", title, "", metadata_json(item)
+        if type_hash == MESSAGE_METADATA_SERVICE_ACTION:
+            title = service_action_title(item)
+            return "service_action", title, "", metadata_json(item)
+
+    url = first_url(str(msg.get("text") or ""))
+    if url and msg.get("media_type") == "web_page":
+        return "web_page", "", url, metadata_json({"url": url})
+    return "", "", "", ""
+
+
+def attach_message_metadata(messages: list[dict[str, Any]]) -> int:
+    count = 0
+    for msg in messages:
+        metadata_type, title, url, raw_json = message_metadata(msg)
+        if not metadata_type:
+            continue
+        msg["metadata_type"] = metadata_type
+        msg["metadata_title"] = title
+        msg["metadata_url"] = url
+        msg["metadata_json"] = raw_json
+        count += 1
+    return count
+
+
 def stable_int(*parts: object) -> int:
     digest = hashlib.sha256(":".join(str(part) for part in parts).encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF
@@ -826,6 +922,8 @@ def remote_media_candidates(messages: list[dict[str, Any]]) -> list[dict[str, An
     candidates = []
     for msg in messages:
         if msg.get("media_path") or not msg.get("media_type"):
+            continue
+        if not message_resource_ids(msg):
             continue
         if cloud_media_key(msg) is None:
             continue
@@ -1132,6 +1230,7 @@ def build_result(
     started: dt.datetime,
     remote_media: dict[str, int] | None = None,
 ) -> dict[str, Any]:
+    attach_message_metadata(messages)
     clear_unarchived_placeholder_media(messages)
     chats: dict[str, dict[str, Any]] = {}
     for msg in messages:
@@ -1195,6 +1294,10 @@ def fixture_kv_int64(key: str, value: int) -> bytes:
     return fixture_short_str(key) + struct.pack("<Bq", 1, value)
 
 
+def fixture_kv_double(key: str, value: float) -> bytes:
+    return fixture_short_str(key) + struct.pack("<Bd", 3, value)
+
+
 def fixture_kv_object(key: str, payload: bytes, type_hash: int) -> bytes:
     return fixture_short_str(key) + struct.pack("B", 5) + fixture_object(payload, type_hash)
 
@@ -1211,8 +1314,13 @@ def fixture_root_typed_object(payload: bytes, type_hash: int) -> bytes:
     return fixture_short_str("_") + struct.pack("B", 5) + fixture_object(payload, type_hash)
 
 
-def fixture_peer(first: str, last: str = "") -> bytes:
-    return fixture_root_object(fixture_kv_string("fn", first) + fixture_kv_string("ln", last))
+def fixture_peer(first: str, last: str = "", username: str = "", phone: str = "") -> bytes:
+    payload = fixture_kv_string("fn", first) + fixture_kv_string("ln", last)
+    if username:
+        payload += fixture_kv_string("un", username)
+    if phone:
+        payload += fixture_kv_string("p", phone)
+    return fixture_root_object(payload)
 
 
 def fixture_message(
@@ -1274,6 +1382,30 @@ def fixture_photo_media(photo_id: int = 123456789) -> bytes:
         + fixture_kv_object("large", large, RESOURCE_TYPE_CLOUD_PHOTO_SIZE)
     )
     return fixture_root_typed_object(media, -1951522668)
+
+
+def fixture_webpage_media() -> bytes:
+    media = fixture_kv_string("u", "https://example.com/article") + fixture_kv_string("ti", "Example Article")
+    return fixture_root_typed_object(media, MESSAGE_METADATA_WEBPAGE)
+
+
+def fixture_location_media() -> bytes:
+    media = (
+        fixture_kv_double("la", 52.1)
+        + fixture_kv_double("lo", 4.3)
+        + fixture_kv_string("adr", "Example Place")
+    )
+    return fixture_root_typed_object(media, MESSAGE_METADATA_LOCATION)
+
+
+def fixture_poll_media() -> bytes:
+    media = fixture_kv_string("t", "Example Poll")
+    return fixture_root_typed_object(media, MESSAGE_METADATA_POLL)
+
+
+def fixture_service_action_media() -> bytes:
+    media = fixture_kv_int32("d", 42) + fixture_kv_int32("dr", 10)
+    return fixture_root_typed_object(media, MESSAGE_METADATA_SERVICE_ACTION)
 
 
 def fixture_message_key(peer_id: int, namespace: int, timestamp: int, message_id: int) -> bytes:
@@ -1409,12 +1541,14 @@ def run_self_test(fixture_dir: str) -> None:
         raise AssertionError("channel peer id conversion failed")
     if postbox_peer_to_telethon_id(fixture_postbox_peer_id(3, 42)) is not None:
         raise AssertionError("secret chat peer id should not be remotely fetched")
+    remote_resource = PostboxDecoder(fixture_photo_media(77)).decode_root_object()
     remote_sample = [
-        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:1", "media_type": "photo", "media_path": ""},
-        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:2", "media_type": "photo", "media_path": "cached"},
-        {"_raw_chat_id": str(fixture_postbox_peer_id(3, 42)), "message_id": "0:3", "media_type": "photo", "media_path": ""},
-        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "1:4", "media_type": "photo", "media_path": ""},
-        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:5", "media_type": "", "media_path": ""},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:1", "media_type": "photo", "media_path": "", "embedded_media": [remote_resource]},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:2", "media_type": "photo", "media_path": "cached", "embedded_media": [remote_resource]},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(3, 42)), "message_id": "0:3", "media_type": "photo", "media_path": "", "embedded_media": [remote_resource]},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "1:4", "media_type": "photo", "media_path": "", "embedded_media": [remote_resource]},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:5", "media_type": "", "media_path": "", "embedded_media": [remote_resource]},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:6", "media_type": "web_page", "media_path": "", "embedded_media": []},
     ]
     if [row["message_id"] for row in remote_media_candidates(remote_sample)] != ["0:1"]:
         raise AssertionError(f"remote media candidate selection failed: {remote_sample!r}")
@@ -1442,6 +1576,26 @@ def run_self_test(fixture_dir: str) -> None:
         raise AssertionError(f"placeholder clear count failed: {placeholder_sample!r}")
     if [row["media_type"] for row in placeholder_sample] != ["", "", "web_page", "photo"]:
         raise AssertionError(f"placeholder media clear failed: {placeholder_sample!r}")
+
+    metadata_sample = [
+        {"text": "", "media_type": "web_page", "embedded_media": [PostboxDecoder(fixture_webpage_media()).decode_root_object()]},
+        {"text": "", "media_type": "media", "embedded_media": [PostboxDecoder(fixture_location_media()).decode_root_object()]},
+        {"text": "", "media_type": "media", "embedded_media": [PostboxDecoder(fixture_poll_media()).decode_root_object()]},
+        {"text": "", "media_type": "media", "embedded_media": [PostboxDecoder(fixture_service_action_media()).decode_root_object()]},
+        {"text": "see https://example.com/from-text.", "media_type": "web_page", "embedded_media": []},
+    ]
+    if attach_message_metadata(metadata_sample) != 5:
+        raise AssertionError(f"metadata attach count failed: {metadata_sample!r}")
+    if [row["metadata_type"] for row in metadata_sample] != ["web_page", "location", "poll", "service_action", "web_page"]:
+        raise AssertionError(f"metadata type decode failed: {metadata_sample!r}")
+    if metadata_sample[0]["metadata_url"] != "https://example.com/article":
+        raise AssertionError(f"web page URL decode failed: {metadata_sample!r}")
+    if metadata_sample[1]["metadata_title"] != "Example Place" or metadata_sample[2]["metadata_title"] != "Example Poll":
+        raise AssertionError(f"location/poll metadata title failed: {metadata_sample!r}")
+    if metadata_sample[3]["metadata_title"] != "call":
+        raise AssertionError(f"service metadata title failed: {metadata_sample!r}")
+    if metadata_sample[4]["metadata_url"] != "https://example.com/from-text":
+        raise AssertionError(f"text URL metadata failed: {metadata_sample!r}")
     import_module = importlib.import_module
     try:
         def missing_telethon(name: str, package: str | None = None) -> Any:
@@ -1470,7 +1624,7 @@ def run_self_test(fixture_dir: str) -> None:
     try:
         asyncio.run(wait_remote(never_finishes(), 0.001))
         raise AssertionError("remote timeout did not fire")
-    except TimeoutError:
+    except (TimeoutError, asyncio.TimeoutError):
         pass
 
     duplicate_sample = [
