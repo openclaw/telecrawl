@@ -78,6 +78,10 @@ locally:
 telecrawl import --dialogs-limit 0 --messages-limit 0 --fetch-media
 ```
 
+Remote media fetches are bounded best-effort operations. Import stats report how
+many remote media candidates were attempted, downloaded, still missing,
+unavailable, timed out, or errored.
+
 When no `--source` is provided on macOS, `telecrawl` checks Telegram Desktop
 `tdata` first, then the native Telegram for macOS group container. No backend
 flag is needed. To import a copied archive directly:

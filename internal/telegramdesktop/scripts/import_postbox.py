@@ -59,6 +59,11 @@ DC_ENDPOINTS = {
     4: ("149.154.167.91", 443),
     5: ("91.108.56.130", 443),
 }
+REMOTE_CONNECT_TIMEOUT_SECONDS = 30
+REMOTE_AUTH_TIMEOUT_SECONDS = 30
+REMOTE_DIALOGS_TIMEOUT_SECONDS = 120
+REMOTE_MESSAGE_TIMEOUT_SECONDS = 45
+REMOTE_DOWNLOAD_TIMEOUT_SECONDS = 180
 
 
 @dataclass(frozen=True)
@@ -775,6 +780,33 @@ def remote_media_missing_count(messages: list[dict[str, Any]]) -> int:
     return len({key for msg in remote_media_candidates(messages) if (key := duplicate_media_key(msg)) is not None})
 
 
+async def wait_remote(awaitable: Any, seconds: int) -> Any:
+    return await asyncio.wait_for(awaitable, timeout=seconds)
+
+
+def empty_remote_media_stats(missing: int = 0) -> dict[str, int]:
+    return {
+        "candidates": missing,
+        "attempted": 0,
+        "downloaded": 0,
+        "missing": missing,
+        "unavailable": 0,
+        "timeouts": 0,
+        "errors": 0,
+    }
+
+
+def add_remote_media_stats(left: dict[str, int], right: dict[str, int]) -> None:
+    for key, value in right.items():
+        if key == "missing":
+            continue
+        left[key] = int(left.get(key, 0)) + int(value or 0)
+
+
+def remote_error_key(exc: Exception) -> str:
+    return "timeouts" if isinstance(exc, TimeoutError) else "errors"
+
+
 async def download_remote_media_for_account(
     native_session: NativeSession,
     messages: list[dict[str, Any]],
@@ -793,45 +825,66 @@ async def download_remote_media_for_account(
     session.save()
 
     client = telethon.TelegramClient(session, TELEGRAM_MAC_API_ID, TELEGRAM_MAC_API_HASH, receive_updates=False)
-    downloaded = 0
+    stats = empty_remote_media_stats()
     dialogs_loaded = False
-    await client.connect()
     try:
-        if not await client.is_user_authorized():
-            return {"downloaded": 0}
+        await wait_remote(client.connect(), REMOTE_CONNECT_TIMEOUT_SECONDS)
+        if not await wait_remote(client.is_user_authorized(), REMOTE_AUTH_TIMEOUT_SECONDS):
+            stats["unavailable"] += len(messages)
+            return stats
         for msg in messages:
             peer_id = postbox_peer_to_telethon_id(int(msg.get("_raw_chat_id") or 0))
             message_id = cloud_message_id(str(msg.get("message_id") or ""))
             if peer_id is None or message_id is None:
+                stats["unavailable"] += 1
                 continue
+            stats["attempted"] += 1
             try:
-                telegram_message = await client.get_messages(peer_id, ids=message_id)
-            except Exception:
+                telegram_message = await wait_remote(
+                    client.get_messages(peer_id, ids=message_id),
+                    REMOTE_MESSAGE_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
                 if dialogs_loaded:
+                    stats[remote_error_key(exc)] += 1
                     continue
                 try:
-                    await client.get_dialogs(limit=None)
+                    await wait_remote(client.get_dialogs(limit=None), REMOTE_DIALOGS_TIMEOUT_SECONDS)
                     dialogs_loaded = True
-                    telegram_message = await client.get_messages(peer_id, ids=message_id)
-                except Exception:
+                    telegram_message = await wait_remote(
+                        client.get_messages(peer_id, ids=message_id),
+                        REMOTE_MESSAGE_TIMEOUT_SECONDS,
+                    )
+                except Exception as fallback_exc:
+                    stats[remote_error_key(fallback_exc)] += 1
                     continue
             if not telegram_message or not getattr(telegram_message, "media", None):
+                stats["unavailable"] += 1
                 continue
             message_dir = output_dir / hashlib.sha256(
                 f"{native_session.account_id}:{msg['source_pk']}".encode("utf-8")
             ).hexdigest()
             message_dir.mkdir(parents=True, exist_ok=True)
             try:
-                path = await client.download_media(telegram_message, file=str(message_dir))
-            except Exception:
+                path = await wait_remote(
+                    client.download_media(telegram_message, file=str(message_dir)),
+                    REMOTE_DOWNLOAD_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                stats[remote_error_key(exc)] += 1
                 continue
             if path and Path(path).is_file():
                 msg["media_path"] = str(path)
                 msg["media_size"] = Path(path).stat().st_size
-                downloaded += 1
+                stats["downloaded"] += 1
+            else:
+                stats["unavailable"] += 1
     finally:
-        await client.disconnect()
-    return {"downloaded": downloaded}
+        try:
+            await wait_remote(client.disconnect(), REMOTE_CONNECT_TIMEOUT_SECONDS)
+        except Exception:
+            pass
+    return stats
 
 
 async def download_remote_media_async(
@@ -843,30 +896,34 @@ async def download_remote_media_async(
     share_duplicate_media(messages)
     candidates = remote_media_candidates(messages)
     if not candidates:
-        return {"downloaded": 0, "missing": 0}
+        return empty_remote_media_stats()
+    stats = empty_remote_media_stats(remote_media_missing_count(messages))
     sessions = {
         account_id: native_session
         for account_id, source in sources_by_account.items()
         if (native_session := native_session_for_source(source)) is not None
     }
     if not sessions:
-        return {"downloaded": 0, "missing": remote_media_missing_count(messages)}
+        stats["unavailable"] = len(candidates)
+        return stats
 
-    downloaded = 0
     by_account: dict[str, list[dict[str, Any]]] = {}
     for msg in candidates:
         by_account.setdefault(str(msg.get("_account_id") or ""), []).append(msg)
     for account_id, rows in by_account.items():
         native_session = sessions.get(account_id)
         if native_session is None:
+            stats["unavailable"] += len(rows)
             continue
         try:
             result = await download_remote_media_for_account(native_session, rows, output_dir, telethon)
         except Exception:
+            stats["errors"] += len(rows)
             continue
-        downloaded += result["downloaded"]
+        add_remote_media_stats(stats, result)
         share_duplicate_media(messages)
-    return {"downloaded": downloaded, "missing": remote_media_missing_count(messages)}
+    stats["missing"] = remote_media_missing_count(messages)
+    return stats
 
 
 def download_remote_media(
@@ -876,17 +933,21 @@ def download_remote_media(
 ) -> dict[str, int]:
     missing = remote_media_missing_count(messages)
     if not media_output_dir or missing == 0:
-        return {"downloaded": 0, "missing": missing}
+        return empty_remote_media_stats(missing)
     try:
         telethon = importlib.import_module("telethon")
     except ImportError:
-        return {"downloaded": 0, "missing": missing}
+        stats = empty_remote_media_stats(missing)
+        stats["errors"] = missing
+        return stats
     output_dir = Path(media_output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
         return asyncio.run(download_remote_media_async(messages, sources_by_account, output_dir, telethon))
     except Exception:
-        return {"downloaded": 0, "missing": remote_media_missing_count(messages)}
+        stats = empty_remote_media_stats(remote_media_missing_count(messages))
+        stats["errors"] = stats["missing"]
+        return stats
 
 
 def build_result(
@@ -1192,8 +1253,26 @@ def run_self_test(fixture_dir: str) -> None:
         result = download_remote_media(remote_sample, {}, "/tmp/telecrawl-unused-media")
     finally:
         importlib.import_module = import_module
-    if result != {"downloaded": 0, "missing": 1}:
+    if result != {
+        "candidates": 1,
+        "attempted": 0,
+        "downloaded": 0,
+        "missing": 1,
+        "unavailable": 0,
+        "timeouts": 0,
+        "errors": 1,
+    }:
         raise AssertionError(f"remote media import failure should be best-effort: {result!r}")
+
+    async def never_finishes() -> None:
+        await asyncio.sleep(1)
+
+    try:
+        asyncio.run(wait_remote(never_finishes(), 0.001))
+        raise AssertionError("remote timeout did not fire")
+    except TimeoutError:
+        pass
+
     duplicate_sample = [
         {
             "_account_id": "account-a",

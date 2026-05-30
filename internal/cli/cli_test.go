@@ -180,16 +180,29 @@ func TestPrintImportStatsIncludesRemoteMediaWhenUsed(t *testing.T) {
 	r := &runtime{stdout: &out}
 
 	if err := r.print(store.ImportStats{
-		SourcePath:           "postbox",
-		DBPath:               "/tmp/telecrawl.db",
-		RemoteMediaDownloads: 2,
-		RemoteMediaMissing:   1,
-		StartedAt:            now,
-		FinishedAt:           now,
+		SourcePath:             "postbox",
+		DBPath:                 "/tmp/telecrawl.db",
+		RemoteMediaCandidates:  4,
+		RemoteMediaAttempted:   3,
+		RemoteMediaDownloads:   2,
+		RemoteMediaMissing:     1,
+		RemoteMediaUnavailable: 1,
+		RemoteMediaTimeouts:    0,
+		RemoteMediaErrors:      0,
+		StartedAt:              now,
+		FinishedAt:             now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"remote_media_downloads: 2\n", "remote_media_missing: 1\n"} {
+	for _, want := range []string{
+		"remote_media_candidates: 4\n",
+		"remote_media_attempted: 3\n",
+		"remote_media_downloads: 2\n",
+		"remote_media_missing: 1\n",
+		"remote_media_unavailable: 1\n",
+		"remote_media_timeouts: 0\n",
+		"remote_media_errors: 0\n",
+	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("output missing %q:\n%s", want, out.String())
 		}

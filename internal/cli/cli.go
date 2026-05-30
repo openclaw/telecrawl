@@ -652,7 +652,17 @@ func (r *runtime) print(v any) error {
 			return err
 		}
 		if value.RemoteMediaDownloads != 0 || value.RemoteMediaMissing != 0 {
-			if _, err := fmt.Fprintf(r.stdout, "remote_media_downloads: %d\nremote_media_missing: %d\n", value.RemoteMediaDownloads, value.RemoteMediaMissing); err != nil {
+			if _, err := fmt.Fprintf(
+				r.stdout,
+				"remote_media_candidates: %d\nremote_media_attempted: %d\nremote_media_downloads: %d\nremote_media_missing: %d\nremote_media_unavailable: %d\nremote_media_timeouts: %d\nremote_media_errors: %d\n",
+				value.RemoteMediaCandidates,
+				value.RemoteMediaAttempted,
+				value.RemoteMediaDownloads,
+				value.RemoteMediaMissing,
+				value.RemoteMediaUnavailable,
+				value.RemoteMediaTimeouts,
+				value.RemoteMediaErrors,
+			); err != nil {
 				return err
 			}
 		}

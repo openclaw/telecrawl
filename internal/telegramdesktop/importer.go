@@ -48,8 +48,13 @@ type pyResult struct {
 	StartedAt   string `json:"started_at"`
 	FinishedAt  string `json:"finished_at"`
 	RemoteMedia struct {
-		Downloaded int `json:"downloaded"`
-		Missing    int `json:"missing"`
+		Candidates  int `json:"candidates"`
+		Attempted   int `json:"attempted"`
+		Downloaded  int `json:"downloaded"`
+		Missing     int `json:"missing"`
+		Unavailable int `json:"unavailable"`
+		Timeouts    int `json:"timeouts"`
+		Errors      int `json:"errors"`
 	} `json:"remote_media"`
 	Chats []struct {
 		ID            string `json:"id"`
@@ -250,12 +255,17 @@ func decodeImportResult(raw pyResult, dbPath string) ImportResult {
 	started := parseTime(raw.StartedAt)
 	finished := parseTime(raw.FinishedAt)
 	result.Stats = store.ImportStats{
-		SourcePath:           raw.SourcePath,
-		DBPath:               dbPath,
-		RemoteMediaDownloads: raw.RemoteMedia.Downloaded,
-		RemoteMediaMissing:   raw.RemoteMedia.Missing,
-		StartedAt:            started,
-		FinishedAt:           finished,
+		SourcePath:             raw.SourcePath,
+		DBPath:                 dbPath,
+		RemoteMediaCandidates:  raw.RemoteMedia.Candidates,
+		RemoteMediaAttempted:   raw.RemoteMedia.Attempted,
+		RemoteMediaDownloads:   raw.RemoteMedia.Downloaded,
+		RemoteMediaMissing:     raw.RemoteMedia.Missing,
+		RemoteMediaUnavailable: raw.RemoteMedia.Unavailable,
+		RemoteMediaTimeouts:    raw.RemoteMedia.Timeouts,
+		RemoteMediaErrors:      raw.RemoteMedia.Errors,
+		StartedAt:              started,
+		FinishedAt:             finished,
 	}
 	for _, c := range raw.Chats {
 		result.Chats = append(result.Chats, store.Chat{
