@@ -13,7 +13,8 @@ It is local-first:
 
 - Normal archive/search commands do not upload data.
 - `backup push` uploads only age-encrypted shards when you run it explicitly.
-- Telegram message text, chat names, sender names, and media metadata stay inside
+- Telegram message text, chat names, sender names, contact phone numbers,
+  contact usernames, avatar path metadata, and media metadata stay inside
   encrypted backup payloads.
 
 ## Install
@@ -107,9 +108,11 @@ telecrawl import --path "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.
 Native macOS imports include every local `account-*` database they find; if more
 than one account is present, stored chat and sender IDs are account-scoped to
 avoid collisions. They archive cached media by default and store Telegram peer
-records as contacts for message enrichment. `--fetch-media` also uses the
-existing native Telegram session to fetch missing cloud media when account auth
-data is present; this does not launch Telegram or start a login/2FA flow.
+records as contacts for message enrichment. Contacts can include phone numbers,
+usernames, and archived avatar paths when those values exist locally, and are
+visible through `telecrawl contacts`. `--fetch-media` also uses the existing
+native Telegram session to fetch missing cloud media when account auth data is
+present; this does not launch Telegram or start a login/2FA flow.
 
 Useful reads:
 
@@ -235,9 +238,10 @@ Git can still see cleartext metadata:
 - plaintext shard hashes
 - backup cadence and which encrypted shards changed
 
-Git cannot read message text, chat names, sender names, or media metadata without
-an age identity. Binary media files archived in `~/.telecrawl/media/` are local
-only and are not included in backup shards.
+Git cannot read message text, chat names, sender names, contact phone numbers,
+contact usernames, avatar path metadata, or media metadata without an age
+identity. Binary media files and cached avatar files archived in
+`~/.telecrawl/media/` are local only and are not included in backup shards.
 
 Keep `~/.telecrawl/age.key` private. If you lose it and no other recipient can
 decrypt the backup, the encrypted backup cannot be restored.
