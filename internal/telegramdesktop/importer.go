@@ -394,6 +394,12 @@ func copyImportedMedia(messages []store.Message, archiveDir string, stats *store
 		if !ok {
 			archivedPath, size, err := copyMediaFile(sourcePath, archiveDir)
 			if err != nil {
+				if isMediaSourceUnavailable(err) {
+					copiedSources[sourcePath] = archivedMedia{}
+					messages[i].MediaPath = ""
+					messages[i].MediaSize = 0
+					continue
+				}
 				return err
 			}
 			archived = archivedMedia{path: archivedPath, size: size}
@@ -401,6 +407,9 @@ func copyImportedMedia(messages []store.Message, archiveDir string, stats *store
 		}
 		messages[i].MediaPath = archived.path
 		messages[i].MediaSize = archived.size
+		if archived.path == "" {
+			continue
+		}
 		if _, ok := archivedFiles[archived.path]; !ok {
 			archivedFiles[archived.path] = archived.size
 		}
@@ -414,13 +423,31 @@ func copyImportedMedia(messages []store.Message, archiveDir string, stats *store
 	return nil
 }
 
+type mediaSourceUnavailableError struct {
+	path string
+	err  error
+}
+
+func (e mediaSourceUnavailableError) Error() string {
+	return fmt.Sprintf("read media %s: %v", e.path, e.err)
+}
+
+func (e mediaSourceUnavailableError) Unwrap() error {
+	return e.err
+}
+
+func isMediaSourceUnavailable(err error) bool {
+	var sourceErr mediaSourceUnavailableError
+	return errors.As(err, &sourceErr)
+}
+
 func copyMediaFile(sourcePath, archiveDir string) (string, int64, error) {
 	if err := os.MkdirAll(archiveDir, 0o700); err != nil {
 		return "", 0, fmt.Errorf("mkdir media archive: %w", err)
 	}
 	source, err := os.Open(sourcePath)
 	if err != nil {
-		return "", 0, fmt.Errorf("open media %s: %w", sourcePath, err)
+		return "", 0, mediaSourceUnavailableError{path: sourcePath, err: err}
 	}
 	defer func() { _ = source.Close() }()
 

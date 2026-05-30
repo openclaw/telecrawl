@@ -11,6 +11,7 @@ The format follows Keep a Changelog, and this project uses Semantic Versioning.
 - Add `import --chat ID` for targeted single-chat imports while preserving unrelated archive data. (#1; thanks @nullyn)
 - Add `metadata --json` crawlkit control metadata for schedulers and local automation.
 - Docker: add a local image with packaged Python bridge dependencies, `/data` persistence, read-only `tdata` mounting docs, and Docker CI smoke coverage.
+- Archive locally cached Telegram macOS Postbox media by default and add opt-in `import --fetch-media` cloud media fetching through existing local session state. (#3; thanks @joshp123)
 - Archive Telegram dialog folders and forum topics, with CLI reads via
   `folders`, `chats --folder`, `topics --chat`, and `messages --topic`.
 - Preserve reply/thread IDs, pinned messages, edits, forwards, reactions,

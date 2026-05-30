@@ -116,6 +116,24 @@ func TestCopyImportedMediaArchivesByContentHash(t *testing.T) {
 	}
 }
 
+func TestCopyImportedMediaSkipsMissingSourceCache(t *testing.T) {
+	t.Parallel()
+	messages := []store.Message{
+		{SourcePK: 1, MediaPath: filepath.Join(t.TempDir(), "missing-cache-file"), MediaSize: 99},
+	}
+	var stats store.ImportStats
+
+	if err := copyImportedMedia(messages, filepath.Join(t.TempDir(), "media"), &stats); err != nil {
+		t.Fatal(err)
+	}
+	if messages[0].MediaPath != "" || messages[0].MediaSize != 0 {
+		t.Fatalf("missing media ref = path %q size %d, want cleared", messages[0].MediaPath, messages[0].MediaSize)
+	}
+	if stats.MediaFiles != 0 || stats.MediaBytes != 0 {
+		t.Fatalf("media stats = %+v, want zero", stats)
+	}
+}
+
 func TestImportPassesFetchMediaToTDataImporter(t *testing.T) {
 	t.Parallel()
 	python, argvPath := fakePythonImporter(t)
