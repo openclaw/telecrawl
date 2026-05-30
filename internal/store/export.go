@@ -32,6 +32,10 @@ func (d SnapshotData) Validate() error {
 }
 
 func (s *Store) ExportAll(ctx context.Context) (SnapshotData, error) {
+	contacts, err := s.allContacts(ctx)
+	if err != nil {
+		return SnapshotData{}, err
+	}
 	chats, err := s.ListChats(ctx, int(^uint(0)>>1), false)
 	if err != nil {
 		return SnapshotData{}, err
@@ -52,7 +56,7 @@ func (s *Store) ExportAll(ctx context.Context) (SnapshotData, error) {
 	if err != nil {
 		return SnapshotData{}, err
 	}
-	return SnapshotData{Chats: chats, Folders: folders, FolderChats: folderChats, Topics: topics, Messages: messages}, nil
+	return SnapshotData{Contacts: contacts, Chats: chats, Folders: folders, FolderChats: folderChats, Topics: topics, Messages: messages}, nil
 }
 
 func (s *Store) ImportSnapshot(ctx context.Context, data SnapshotData, sourcePath string, finishedAt time.Time) error {
@@ -65,7 +69,43 @@ func (s *Store) ImportSnapshot(ctx context.Context, data SnapshotData, sourcePat
 			stats.MediaMessages++
 		}
 	}
-	return s.ReplaceAll(ctx, stats, data.Chats, data.Folders, data.FolderChats, data.Topics, data.Messages)
+	return s.ReplaceAll(ctx, stats, data.Contacts, data.Chats, data.Folders, data.FolderChats, data.Topics, data.Messages)
+}
+
+func (s *Store) ListContacts(ctx context.Context, limit int) ([]Contact, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	return s.contacts(ctx, limit)
+}
+
+func (s *Store) allContacts(ctx context.Context) ([]Contact, error) {
+	return s.contacts(ctx, 0)
+}
+
+func (s *Store) contacts(ctx context.Context, limit int) ([]Contact, error) {
+	query := `select jid,coalesce(peer_type,''),coalesce(phone,''),coalesce(full_name,''),coalesce(first_name,''),coalesce(last_name,''),coalesce(business_name,''),coalesce(username,''),coalesce(lid,''),coalesce(about_text,''),coalesce(avatar_path,''),coalesce(updated_at,0) from contacts order by jid`
+	args := []any{}
+	if limit > 0 {
+		query += " limit ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Contact
+	for rows.Next() {
+		var c Contact
+		var updatedAt int64
+		if err := rows.Scan(&c.JID, &c.PeerType, &c.Phone, &c.FullName, &c.FirstName, &c.LastName, &c.BusinessName, &c.Username, &c.LID, &c.AboutText, &c.AvatarPath, &updatedAt); err != nil {
+			return nil, err
+		}
+		c.UpdatedAt = fromUnix(updatedAt)
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) allFolderChats(ctx context.Context) ([]FolderChat, error) {

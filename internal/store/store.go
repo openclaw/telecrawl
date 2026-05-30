@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 type Store struct {
 	db   *sql.DB
@@ -98,6 +98,7 @@ type Topic struct {
 
 type Contact struct {
 	JID          string    `json:"jid"`
+	PeerType     string    `json:"peer_type,omitempty"`
 	Phone        string    `json:"phone,omitempty"`
 	FullName     string    `json:"full_name,omitempty"`
 	FirstName    string    `json:"first_name,omitempty"`
@@ -106,6 +107,7 @@ type Contact struct {
 	Username     string    `json:"username,omitempty"`
 	LID          string    `json:"lid,omitempty"`
 	AboutText    string    `json:"about_text,omitempty"`
+	AvatarPath   string    `json:"avatar_path,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at,omitzero"`
 }
 
@@ -211,7 +213,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) Path() string { return s.path }
 
-func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID string, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
+func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID string, contacts []Contact, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -240,6 +242,9 @@ func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID strin
 		if _, err := tx.ExecContext(ctx, `delete from folder_chats where chat_jid = ?`, chatJID); err != nil {
 			return err
 		}
+	}
+	if err := insertContacts(ctx, tx, contacts); err != nil {
+		return err
 	}
 	for _, c := range chats {
 		if preserveFolderState && c.FolderID == "" {
@@ -283,7 +288,7 @@ func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID strin
 	return tx.Commit()
 }
 
-func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
+func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, contacts []Contact, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -293,6 +298,9 @@ func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, chats []Chat,
 		if _, err := tx.ExecContext(ctx, q); err != nil {
 			return err
 		}
+	}
+	if err := insertContacts(ctx, tx, contacts); err != nil {
+		return err
 	}
 	for _, c := range chats {
 		if _, err := tx.ExecContext(ctx, `insert into chats(id,kind,name,username,last_message_at,unread_count,message_count,folder_id,forum) values(?,?,?,?,?,?,?,?,?)`,
@@ -331,6 +339,19 @@ func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, chats []Chat,
 		}
 	}
 	return tx.Commit()
+}
+
+func insertContacts(ctx context.Context, tx *sql.Tx, contacts []Contact) error {
+	for _, c := range contacts {
+		if strings.TrimSpace(c.JID) == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `insert into contacts(jid,peer_type,phone,full_name,first_name,last_name,business_name,username,lid,about_text,avatar_path,updated_at) values(?,?,?,?,?,?,?,?,?,?,?,?) on conflict(jid) do update set peer_type=excluded.peer_type, phone=excluded.phone, full_name=excluded.full_name, first_name=excluded.first_name, last_name=excluded.last_name, business_name=excluded.business_name, username=excluded.username, lid=excluded.lid, about_text=excluded.about_text, avatar_path=excluded.avatar_path, updated_at=excluded.updated_at`,
+			c.JID, c.PeerType, c.Phone, c.FullName, c.FirstName, c.LastName, c.BusinessName, c.Username, c.LID, c.AboutText, c.AvatarPath, unix(c.UpdatedAt)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func insertMessages(ctx context.Context, tx *sql.Tx, messages []Message) error {
@@ -595,6 +616,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			"metadata_title":    "text",
 			"metadata_url":      "text",
 			"metadata_json":     "text",
+		},
+		"contacts": {
+			"peer_type":   "text",
+			"avatar_path": "text",
 		},
 	}
 	for table, defs := range adds {
