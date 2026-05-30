@@ -375,7 +375,7 @@ func existingMediaRefs(ctx context.Context, st *store.Store) (string, map[int64]
 }
 
 func importResultForChat(result telegramdesktop.ImportResult, chatJID string) telegramdesktop.ImportResult {
-	out := telegramdesktop.ImportResult{Stats: result.Stats, Contacts: result.Contacts, Folders: result.Folders}
+	out := telegramdesktop.ImportResult{Stats: result.Stats, Folders: result.Folders}
 	for _, chat := range result.Chats {
 		if chat.JID == chatJID {
 			out.Chats = append(out.Chats, chat)
@@ -394,6 +394,29 @@ func importResultForChat(result telegramdesktop.ImportResult, chatJID string) te
 	for _, message := range result.Messages {
 		if message.ChatJID == chatJID {
 			out.Messages = append(out.Messages, message)
+		}
+	}
+	out.Contacts = contactsForMessages(result.Contacts, out.Messages, chatJID)
+	return out
+}
+
+func contactsForMessages(contacts []store.Contact, messages []store.Message, chatJID string) []store.Contact {
+	peerIDs := map[string]struct{}{}
+	if strings.TrimSpace(chatJID) != "" {
+		peerIDs[chatJID] = struct{}{}
+	}
+	for _, message := range messages {
+		if strings.TrimSpace(message.ChatJID) != "" {
+			peerIDs[message.ChatJID] = struct{}{}
+		}
+		if strings.TrimSpace(message.SenderJID) != "" {
+			peerIDs[message.SenderJID] = struct{}{}
+		}
+	}
+	out := make([]store.Contact, 0, len(peerIDs))
+	for _, contact := range contacts {
+		if _, ok := peerIDs[contact.JID]; ok {
+			out = append(out, contact)
 		}
 	}
 	return out

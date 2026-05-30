@@ -899,6 +899,16 @@ def filter_chat(messages: list[dict[str, Any]], chat_id: str) -> list[dict[str, 
     return [msg for msg in messages if msg["chat_id"] == chat_id or msg.get("_raw_chat_id") == chat_id]
 
 
+def filter_contacts_for_messages(contacts: list[dict[str, Any]], messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    peer_ids = {
+        str(value)
+        for msg in messages
+        for value in (msg.get("chat_id"), msg.get("sender_id"))
+        if str(value or "").strip()
+    }
+    return [contact for contact in contacts if str(contact.get("id") or "") in peer_ids]
+
+
 def import_source(source: PostboxSource, passcodes: list[bytes], multi_account: bool) -> tuple[dict[str, str], list[dict[str, Any]], list[dict[str, Any]]]:
     key = parse_tempkey(source.key_path, passcodes)
     conn = connect_postbox(source.db_path, key)
@@ -1801,11 +1811,19 @@ def run_self_test(fixture_dir: str) -> None:
     ]
     public_connections = [
         FixturePostboxConnection(
-            {100: fixture_peer("Fixture", "A"), 4242: fixture_peer("Sender", "A", "sendera", "+15550000001")},
+            {
+                100: fixture_peer("Fixture", "A"),
+                4242: fixture_peer("Sender", "A", "sendera", "+15550000001"),
+                9999: fixture_peer("Unused", "A", "unuseda", "+15559990001"),
+            },
             [(fixture_message_key(100, 0, 1_421_404_800, 1), fixture_message("public account a"))],
         ),
         FixturePostboxConnection(
-            {100: fixture_peer("Fixture", "B"), 4242: fixture_peer("Sender", "B", "senderb", "+15550000002")},
+            {
+                100: fixture_peer("Fixture", "B"),
+                4242: fixture_peer("Sender", "B", "senderb", "+15550000002"),
+                9999: fixture_peer("Unused", "B", "unusedb", "+15559990002"),
+            },
             [(fixture_message_key(100, 0, 1_421_404_801, 1), fixture_message("public account b"))],
         ),
     ]
@@ -1826,7 +1844,12 @@ def run_self_test(fixture_dir: str) -> None:
         raise AssertionError("public multi-account import collapsed distinct chats")
     if public_filtered[0]["source_pk"] == public_filtered[1]["source_pk"]:
         raise AssertionError("public multi-account import collided source keys")
-    public_result = build_result("fixture-postbox", public_peers, public_contacts, public_filtered, dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc))
+    public_filtered_contacts = filter_contacts_for_messages(public_contacts, public_filtered)
+    if len(public_contacts) != 6 or len(public_filtered_contacts) != 4:
+        raise AssertionError(f"public contact filtering shape failed: {public_contacts!r} -> {public_filtered_contacts!r}")
+    if any(contact["username"].startswith("unused") for contact in public_filtered_contacts):
+        raise AssertionError(f"public contact filtering kept unrelated contacts: {public_filtered_contacts!r}")
+    public_result = build_result("fixture-postbox", public_peers, public_filtered_contacts, public_filtered, dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc))
     if len(public_result["chats"]) != 2 or len(public_result["messages"]) != 2:
         raise AssertionError(f"public import result shape failed: {public_result!r}")
     if len(public_result["contacts"]) != 4:
@@ -1894,7 +1917,10 @@ def main() -> None:
         share_duplicate_media(limited)
         share_resource_media(limited)
     source_path = str(Path(args.source).expanduser()) if args.source else str(default_group_path())
-    json.dump(build_result(source_path, all_peers, list(all_contacts.values()), limited, started, remote_media), sys.stdout, separators=(",", ":"))
+    contacts = list(all_contacts.values())
+    if args.chat:
+        contacts = filter_contacts_for_messages(contacts, limited)
+    json.dump(build_result(source_path, all_peers, contacts, limited, started, remote_media), sys.stdout, separators=(",", ":"))
 
 
 if __name__ == "__main__":
