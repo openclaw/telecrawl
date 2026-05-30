@@ -89,9 +89,9 @@ fetch is attempted, so `--fetch-media` only tries media that is not already in
 the local archive.
 
 Native Postbox can tag link previews, polls, geo/live-geo, service messages, or
-deleted messages as broad media candidates. `telecrawl` tries those during
-`--fetch-media`, but only keeps them as media rows when Telegram returns a
-downloadable file.
+deleted messages as broad media candidates. `telecrawl` archives their decoded
+message metadata separately from binary media, and only keeps them as media rows
+when Telegram returns a downloadable file.
 
 When no `--source` is provided on macOS, `telecrawl` checks Telegram Desktop
 `tdata` first, then the native Telegram for macOS group container. No backend
@@ -103,14 +103,16 @@ telecrawl import --path "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.
 
 Native macOS imports include every local `account-*` database they find; if more
 than one account is present, stored chat and sender IDs are account-scoped to
-avoid collisions. They archive cached media by default. `--fetch-media` also uses
-the existing native Telegram session to fetch missing cloud media when account
-auth data is present; this does not launch Telegram or start a login/2FA flow.
+avoid collisions. They archive cached media by default and store Telegram peer
+records as contacts for message enrichment. `--fetch-media` also uses the
+existing native Telegram session to fetch missing cloud media when account auth
+data is present; this does not launch Telegram or start a login/2FA flow.
 
 Useful reads:
 
 ```bash
 telecrawl folders
+telecrawl contacts
 telecrawl chats --limit 20
 telecrawl chats --folder FOLDER_ID
 telecrawl chats --unread

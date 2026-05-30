@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 type Store struct {
 	db   *sql.DB
@@ -98,6 +98,7 @@ type Topic struct {
 
 type Contact struct {
 	JID          string    `json:"jid"`
+	PeerType     string    `json:"peer_type,omitempty"`
 	Phone        string    `json:"phone,omitempty"`
 	FullName     string    `json:"full_name,omitempty"`
 	FirstName    string    `json:"first_name,omitempty"`
@@ -106,6 +107,7 @@ type Contact struct {
 	Username     string    `json:"username,omitempty"`
 	LID          string    `json:"lid,omitempty"`
 	AboutText    string    `json:"about_text,omitempty"`
+	AvatarPath   string    `json:"avatar_path,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at,omitzero"`
 }
 
@@ -143,6 +145,10 @@ type Message struct {
 	MediaPath     string    `json:"media_path,omitempty"`
 	MediaURL      string    `json:"media_url,omitempty"`
 	MediaSize     int64     `json:"media_size,omitempty"`
+	MetadataType  string    `json:"metadata_type,omitempty"`
+	MetadataTitle string    `json:"metadata_title,omitempty"`
+	MetadataURL   string    `json:"metadata_url,omitempty"`
+	MetadataJSON  string    `json:"metadata_json,omitempty"`
 	Starred       bool      `json:"starred,omitempty"`
 	TopicID       string    `json:"topic_id,omitempty"`
 	ReplyToID     string    `json:"reply_to_message_id,omitempty"`
@@ -207,7 +213,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) Path() string { return s.path }
 
-func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID string, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
+func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID string, contacts []Contact, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -237,6 +243,9 @@ func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID strin
 			return err
 		}
 	}
+	if err := insertContacts(ctx, tx, contacts); err != nil {
+		return err
+	}
 	for _, c := range chats {
 		if preserveFolderState && c.FolderID == "" {
 			c.FolderID = existingFolderID
@@ -264,15 +273,8 @@ func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID strin
 			return err
 		}
 	}
-	for _, m := range messages {
-		if _, err := tx.ExecContext(ctx, `insert into messages(source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,edit_ts,forward_json,reactions_json,views,forwards,replies_count,pinned) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			m.SourcePK, m.ChatJID, m.ChatName, m.MessageID, m.SenderJID, m.SenderName, unix(m.Timestamp), boolInt(m.FromMe), m.Text, m.RawType, m.MessageType, m.MediaType, m.MediaTitle, m.MediaPath, m.MediaURL, m.MediaSize, boolInt(m.Starred), m.TopicID, m.ReplyToID, m.ReplyToChat, m.ThreadID, unix(m.EditTime), m.ForwardJSON, m.ReactionsJSON, m.Views, m.Forwards, m.RepliesCount, boolInt(m.Pinned)); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `insert into messages_fts(rowid,text,chat,sender,media) values((select rowid from messages where source_pk=?),?,?,?,?)`,
-			m.SourcePK, strings.TrimSpace(m.Text+" "+m.MediaTitle), m.ChatName, m.SenderName, m.MediaType); err != nil {
-			return err
-		}
+	if err := insertMessages(ctx, tx, messages); err != nil {
+		return err
 	}
 	now := stats.FinishedAt
 	if now.IsZero() {
@@ -286,7 +288,7 @@ func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID strin
 	return tx.Commit()
 }
 
-func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
+func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, contacts []Contact, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -296,6 +298,9 @@ func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, chats []Chat,
 		if _, err := tx.ExecContext(ctx, q); err != nil {
 			return err
 		}
+	}
+	if err := insertContacts(ctx, tx, contacts); err != nil {
+		return err
 	}
 	for _, c := range chats {
 		if _, err := tx.ExecContext(ctx, `insert into chats(id,kind,name,username,last_message_at,unread_count,message_count,folder_id,forum) values(?,?,?,?,?,?,?,?,?)`,
@@ -321,15 +326,8 @@ func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, chats []Chat,
 			return err
 		}
 	}
-	for _, m := range messages {
-		if _, err := tx.ExecContext(ctx, `insert into messages(source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,edit_ts,forward_json,reactions_json,views,forwards,replies_count,pinned) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			m.SourcePK, m.ChatJID, m.ChatName, m.MessageID, m.SenderJID, m.SenderName, unix(m.Timestamp), boolInt(m.FromMe), m.Text, m.RawType, m.MessageType, m.MediaType, m.MediaTitle, m.MediaPath, m.MediaURL, m.MediaSize, boolInt(m.Starred), m.TopicID, m.ReplyToID, m.ReplyToChat, m.ThreadID, unix(m.EditTime), m.ForwardJSON, m.ReactionsJSON, m.Views, m.Forwards, m.RepliesCount, boolInt(m.Pinned)); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `insert into messages_fts(rowid,text,chat,sender,media) values((select rowid from messages where source_pk=?),?,?,?,?)`,
-			m.SourcePK, strings.TrimSpace(m.Text+" "+m.MediaTitle), m.ChatName, m.SenderName, m.MediaType); err != nil {
-			return err
-		}
+	if err := insertMessages(ctx, tx, messages); err != nil {
+		return err
 	}
 	now := stats.FinishedAt
 	if now.IsZero() {
@@ -341,6 +339,33 @@ func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, chats []Chat,
 		}
 	}
 	return tx.Commit()
+}
+
+func insertContacts(ctx context.Context, tx *sql.Tx, contacts []Contact) error {
+	for _, c := range contacts {
+		if strings.TrimSpace(c.JID) == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `insert into contacts(jid,peer_type,phone,full_name,first_name,last_name,business_name,username,lid,about_text,avatar_path,updated_at) values(?,?,?,?,?,?,?,?,?,?,?,?) on conflict(jid) do update set peer_type=excluded.peer_type, phone=excluded.phone, full_name=excluded.full_name, first_name=excluded.first_name, last_name=excluded.last_name, business_name=excluded.business_name, username=excluded.username, lid=excluded.lid, about_text=excluded.about_text, avatar_path=excluded.avatar_path, updated_at=excluded.updated_at`,
+			c.JID, c.PeerType, c.Phone, c.FullName, c.FirstName, c.LastName, c.BusinessName, c.Username, c.LID, c.AboutText, c.AvatarPath, unix(c.UpdatedAt)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func insertMessages(ctx context.Context, tx *sql.Tx, messages []Message) error {
+	for _, m := range messages {
+		if _, err := tx.ExecContext(ctx, `insert into messages(source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,metadata_type,metadata_title,metadata_url,metadata_json,starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,edit_ts,forward_json,reactions_json,views,forwards,replies_count,pinned) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			m.SourcePK, m.ChatJID, m.ChatName, m.MessageID, m.SenderJID, m.SenderName, unix(m.Timestamp), boolInt(m.FromMe), m.Text, m.RawType, m.MessageType, m.MediaType, m.MediaTitle, m.MediaPath, m.MediaURL, m.MediaSize, m.MetadataType, m.MetadataTitle, m.MetadataURL, m.MetadataJSON, boolInt(m.Starred), m.TopicID, m.ReplyToID, m.ReplyToChat, m.ThreadID, unix(m.EditTime), m.ForwardJSON, m.ReactionsJSON, m.Views, m.Forwards, m.RepliesCount, boolInt(m.Pinned)); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `insert into messages_fts(rowid,text,chat,sender,media) values((select rowid from messages where source_pk=?),?,?,?,?)`,
+			m.SourcePK, strings.TrimSpace(m.Text+" "+m.MediaTitle+" "+m.MetadataTitle+" "+m.MetadataURL), m.ChatName, m.SenderName, m.MediaType); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Status(ctx context.Context) (Status, error) {
@@ -500,11 +525,11 @@ func (s *Store) messages(ctx context.Context, filter MessageFilter, search bool)
 	if filter.Limit <= 0 {
 		filter.Limit = 50
 	}
-	query := `select source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,edit_ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,forward_json,reactions_json,views,forwards,replies_count,pinned,'' from messages where 1=1`
+	query := `select source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,edit_ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,coalesce(metadata_type,''),coalesce(metadata_title,''),coalesce(metadata_url,''),coalesce(metadata_json,''),starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,forward_json,reactions_json,views,forwards,replies_count,pinned,'' from messages where 1=1`
 	args := []any{}
 	prefix := ""
 	if search {
-		query = `select m.source_pk,m.chat_jid,m.chat_name,m.msg_id,m.sender_jid,m.sender_name,m.ts,m.edit_ts,m.from_me,m.text,m.raw_type,m.message_type,m.media_type,m.media_title,m.media_path,m.media_url,m.media_size,m.starred,m.topic_id,m.reply_to_msg_id,m.reply_to_chat_jid,m.thread_id,m.forward_json,m.reactions_json,m.views,m.forwards,m.replies_count,m.pinned,snippet(messages_fts,0,'[',']','...',12) from messages_fts f join messages m on m.rowid=f.rowid where messages_fts match ?`
+		query = `select m.source_pk,m.chat_jid,m.chat_name,m.msg_id,m.sender_jid,m.sender_name,m.ts,m.edit_ts,m.from_me,m.text,m.raw_type,m.message_type,m.media_type,m.media_title,m.media_path,m.media_url,m.media_size,coalesce(m.metadata_type,''),coalesce(m.metadata_title,''),coalesce(m.metadata_url,''),coalesce(m.metadata_json,''),m.starred,m.topic_id,m.reply_to_msg_id,m.reply_to_chat_jid,m.thread_id,m.forward_json,m.reactions_json,m.views,m.forwards,m.replies_count,m.pinned,snippet(messages_fts,0,'[',']','...',12) from messages_fts f join messages m on m.rowid=f.rowid where messages_fts match ?`
 		args = append(args, filter.Query)
 		prefix = "m."
 	}
@@ -556,7 +581,7 @@ func (s *Store) messages(ctx context.Context, filter MessageFilter, search bool)
 		var m Message
 		var ts, editTS int64
 		var fromMe, starred, pinned int
-		if err := rows.Scan(&m.SourcePK, &m.ChatJID, &m.ChatName, &m.MessageID, &m.SenderJID, &m.SenderName, &ts, &editTS, &fromMe, &m.Text, &m.RawType, &m.MessageType, &m.MediaType, &m.MediaTitle, &m.MediaPath, &m.MediaURL, &m.MediaSize, &starred, &m.TopicID, &m.ReplyToID, &m.ReplyToChat, &m.ThreadID, &m.ForwardJSON, &m.ReactionsJSON, &m.Views, &m.Forwards, &m.RepliesCount, &pinned, &m.Snippet); err != nil {
+		if err := rows.Scan(&m.SourcePK, &m.ChatJID, &m.ChatName, &m.MessageID, &m.SenderJID, &m.SenderName, &ts, &editTS, &fromMe, &m.Text, &m.RawType, &m.MessageType, &m.MediaType, &m.MediaTitle, &m.MediaPath, &m.MediaURL, &m.MediaSize, &m.MetadataType, &m.MetadataTitle, &m.MetadataURL, &m.MetadataJSON, &starred, &m.TopicID, &m.ReplyToID, &m.ReplyToChat, &m.ThreadID, &m.ForwardJSON, &m.ReactionsJSON, &m.Views, &m.Forwards, &m.RepliesCount, &pinned, &m.Snippet); err != nil {
 			return nil, err
 		}
 		m.Timestamp = fromUnix(ts)
@@ -587,6 +612,14 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			"forwards":          "integer not null default 0",
 			"replies_count":     "integer not null default 0",
 			"pinned":            "integer not null default 0",
+			"metadata_type":     "text",
+			"metadata_title":    "text",
+			"metadata_url":      "text",
+			"metadata_json":     "text",
+		},
+		"contacts": {
+			"peer_type":   "text",
+			"avatar_path": "text",
 		},
 	}
 	for table, defs := range adds {

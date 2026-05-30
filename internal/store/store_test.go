@@ -12,6 +12,16 @@ func TestSnapshotRoundTripPreservesTelegramStructure(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 5, 9, 3, 17, 53, 0, time.UTC)
 	data := SnapshotData{
+		Contacts: []Contact{{
+			JID:       "9",
+			PeerType:  "user",
+			Phone:     "+15551234567",
+			FullName:  "Peter Example",
+			FirstName: "Peter",
+			LastName:  "Example",
+			Username:  "peter",
+			UpdatedAt: now,
+		}},
 		Chats: []Chat{{
 			JID:           "-10042",
 			Kind:          "channel",
@@ -63,6 +73,10 @@ func TestSnapshotRoundTripPreservesTelegramStructure(t *testing.T) {
 			MediaType:     "webpage",
 			MediaTitle:    "GitHub",
 			MediaSize:     123,
+			MetadataType:  "web_page",
+			MetadataTitle: "GitHub",
+			MetadataURL:   "https://github.com/openclaw/telecrawl",
+			MetadataJSON:  `{"url":"https://github.com/openclaw/telecrawl"}`,
 			ForwardJSON:   `{"from_name":"someone"}`,
 			ReactionsJSON: `{"results":[]}`,
 			Views:         10,
@@ -88,6 +102,9 @@ func TestSnapshotRoundTripPreservesTelegramStructure(t *testing.T) {
 	}
 	if got := len(exported.Topics); got != 1 {
 		t.Fatalf("topics = %d, want 1", got)
+	}
+	if got := len(exported.Contacts); got != 1 {
+		t.Fatalf("contacts = %d, want 1", got)
 	}
 
 	restored := openTestStore(t, filepath.Join(t.TempDir(), "restored.db"))
@@ -116,8 +133,15 @@ func TestSnapshotRoundTripPreservesTelegramStructure(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(messages))
 	}
 	msg := messages[0]
-	if msg.ReplyToID != "17" || msg.ReactionsJSON == "" || msg.ForwardJSON == "" || msg.Views != 10 || !msg.Pinned {
+	if msg.ReplyToID != "17" || msg.ReactionsJSON == "" || msg.ForwardJSON == "" || msg.Views != 10 || !msg.Pinned || msg.MetadataType != "web_page" || msg.MetadataURL == "" {
 		t.Fatalf("message metadata lost: %#v", msg)
+	}
+	restoredExport, err := restored.ExportAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restoredExport.Contacts) != 1 || restoredExport.Contacts[0].Phone != "+15551234567" || restoredExport.Contacts[0].PeerType != "user" {
+		t.Fatalf("contact lost: %#v", restoredExport.Contacts)
 	}
 }
 
@@ -155,6 +179,7 @@ func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 
 	initial := ImportStats{SourcePath: "tdata", DBPath: st.Path(), Chats: 2, Messages: 3, StartedAt: now, FinishedAt: now}
 	if err := st.ReplaceAll(ctx, initial,
+		nil,
 		[]Chat{chatA, chatB},
 		[]Folder{{ID: "1", Title: "F1"}, {ID: "2", Title: "F2"}},
 		[]FolderChat{fcA, fcB},
@@ -169,6 +194,7 @@ func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 
 	upsertStats := ImportStats{SourcePath: "tdata", DBPath: st.Path(), Chats: 1, Messages: 1, MediaMessages: 1, StartedAt: later, FinishedAt: later}
 	if err := st.UpsertChat(ctx, upsertStats, "-1001",
+		nil,
 		[]Chat{updatedChatA},
 		nil, nil,
 		nil,

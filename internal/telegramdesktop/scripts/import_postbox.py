@@ -22,6 +22,7 @@ import importlib
 import io
 import json
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -49,6 +50,11 @@ RESOURCE_TYPE_CLOUD_DOCUMENT_SIZE = -2129249780
 RESOURCE_TYPE_CLOUD_DOCUMENT = 486562374
 RESOURCE_TYPE_LOCAL_FILE = 711798229
 RESOURCE_TYPE_LOCAL_FILE_REFERENCE = 1868491758
+MESSAGE_METADATA_SERVICE_ACTION = -1132984447
+MESSAGE_METADATA_LOCATION = -1138242673
+MESSAGE_METADATA_POLL = -165764138
+MESSAGE_METADATA_WEBPAGE = -661322156
+URL_RE = re.compile(r"https?://[^\s<>()\"']+")
 # Public Telegram for macOS app identity from TelegramSwift.
 TELEGRAM_MAC_API_ID = 9
 TELEGRAM_MAC_API_HASH = "3975f648bb682ee889f35483bc618d1c"  # gitleaks:allow
@@ -412,6 +418,28 @@ def peer_display(peer: Any) -> str:
     return ""
 
 
+def clean_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def peer_type_for_id(peer_id: int) -> str:
+    parts = postbox_peer_parts(peer_id)
+    if parts is None:
+        return "unknown"
+    namespace, _ = parts
+    if namespace == 0:
+        return "user"
+    if namespace == 1:
+        return "group"
+    if namespace == 2:
+        return "channel"
+    if namespace == 3:
+        return "secret_chat"
+    return "unknown"
+
+
 def peer_access_hash(peer: Any) -> int:
     if not isinstance(peer, dict):
         return 0
@@ -432,8 +460,21 @@ def load_peer_records(conn: Any) -> dict[int, dict[str, Any]]:
             continue
         display = peer_display(peer)
         access_hash = peer_access_hash(peer)
-        if display or access_hash:
-            peers[key] = {"display": display, "access_hash": access_hash}
+        first_name = clean_text(peer.get("fn") if isinstance(peer, dict) else "")
+        last_name = clean_text(peer.get("ln") if isinstance(peer, dict) else "")
+        title = clean_text(peer.get("t") if isinstance(peer, dict) else "")
+        username = clean_text(peer.get("un") if isinstance(peer, dict) else "")
+        phone = clean_text(peer.get("p") if isinstance(peer, dict) else "")
+        if display or access_hash or first_name or last_name or title or username or phone:
+            peers[key] = {
+                "display": display,
+                "access_hash": access_hash,
+                "first_name": first_name,
+                "last_name": last_name,
+                "title": title,
+                "username": username,
+                "phone": phone,
+            }
     return peers
 
 
@@ -441,13 +482,44 @@ def load_peer_map(conn: Any) -> dict[int, str]:
     return {peer_id: str(peer.get("display") or "") for peer_id, peer in load_peer_records(conn).items()}
 
 
-def read_source_records(source: PostboxSource, conn: Any, multi_account: bool) -> tuple[dict[str, str], list[dict[str, Any]]]:
+def contact_for_peer(account_id: str, peer_id: int, peer: dict[str, Any], multi_account: bool) -> dict[str, Any] | None:
+    jid = peer_store_id(account_id, peer_id, multi_account)
+    peer_type = peer_type_for_id(peer_id)
+    full_name = clean_text(peer.get("display") or peer.get("title"))
+    first_name = clean_text(peer.get("first_name"))
+    last_name = clean_text(peer.get("last_name"))
+    username = clean_text(peer.get("username"))
+    phone = clean_text(peer.get("phone"))
+    if not any([full_name, first_name, last_name, username, phone]) and peer_type == "unknown":
+        return None
+    return {
+        "id": jid,
+        "peer_type": peer_type,
+        "phone": phone,
+        "full_name": full_name,
+        "first_name": first_name,
+        "last_name": last_name,
+        "business_name": "",
+        "username": username,
+        "lid": "",
+        "about_text": "",
+        "avatar_path": "",
+        "updated_at": "",
+    }
+
+
+def read_source_records(source: PostboxSource, conn: Any, multi_account: bool) -> tuple[dict[str, str], list[dict[str, Any]], list[dict[str, Any]]]:
     raw_peer_records = load_peer_records(conn)
     raw_peers = {peer_id: str(peer.get("display") or "") for peer_id, peer in raw_peer_records.items()}
     peers = {
         peer_store_id(source.account_id, peer_id, multi_account): display
         for peer_id, display in raw_peers.items()
     }
+    contacts = [
+        contact
+        for peer_id, peer in raw_peer_records.items()
+        if (contact := contact_for_peer(source.account_id, peer_id, peer, multi_account)) is not None
+    ]
     messages: list[dict[str, Any]] = []
     media_root = source.db_path.parent.parent / "media"
     for key_blob, value in conn.execute("SELECT key, value FROM t7 ORDER BY key"):
@@ -496,7 +568,7 @@ def read_source_records(source: PostboxSource, conn: Any, multi_account: bool) -
             "media_size": media_size,
             "embedded_media": msg.get("embedded_media") or [],
         })
-    return peers, messages
+    return peers, contacts, messages
 
 
 def read_forward_info(reader: ByteReader) -> None:
@@ -679,6 +751,90 @@ def media_title_for(msg: dict[str, Any]) -> str:
     return ""
 
 
+def json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): json_safe(nested) for key, nested in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, list):
+        return [json_safe(nested) for nested in value]
+    if isinstance(value, tuple):
+        return [json_safe(nested) for nested in value]
+    if isinstance(value, bytes):
+        return {"base64": base64.b64encode(value).decode("ascii")}
+    return value
+
+
+def metadata_json(value: Any) -> str:
+    return json.dumps(json_safe(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def first_string(value: Any, keys: Iterable[str]) -> str:
+    if not isinstance(value, dict):
+        return ""
+    for key in keys:
+        text = clean_text(value.get(key))
+        if text:
+            return text
+    return ""
+
+
+def first_url(text: str) -> str:
+    match = URL_RE.search(text or "")
+    if not match:
+        return ""
+    return match.group(0).rstrip(".,;:")
+
+
+def service_action_title(value: dict[str, Any]) -> str:
+    if any(key in value for key in ("d", "dr", "vc")):
+        return "call"
+    if "t" in value:
+        return "title_change"
+    if "m" in value:
+        return "member_change"
+    if "p" in value:
+        return "pin"
+    return "service_action"
+
+
+def message_metadata(msg: dict[str, Any]) -> tuple[str, str, str, str]:
+    for item in msg.get("embedded_media") or []:
+        if not isinstance(item, dict):
+            continue
+        type_hash = item.get("@type")
+        if type_hash == MESSAGE_METADATA_WEBPAGE:
+            url = first_string(item, ("u", "du", "url"))
+            title = first_string(item, ("ti", "title", "t", "tx"))
+            return "web_page", title, url, metadata_json(item)
+        if type_hash == MESSAGE_METADATA_LOCATION:
+            title = first_string(item, ("adr", "t", "title"))
+            return "location", title, "", metadata_json(item)
+        if type_hash == MESSAGE_METADATA_POLL:
+            title = first_string(item, ("t", "title"))
+            return "poll", title, "", metadata_json(item)
+        if type_hash == MESSAGE_METADATA_SERVICE_ACTION:
+            title = service_action_title(item)
+            return "service_action", title, "", metadata_json(item)
+
+    url = first_url(str(msg.get("text") or ""))
+    if url and msg.get("media_type") == "web_page":
+        return "web_page", "", url, metadata_json({"url": url})
+    return "", "", "", ""
+
+
+def attach_message_metadata(messages: list[dict[str, Any]]) -> int:
+    count = 0
+    for msg in messages:
+        metadata_type, title, url, raw_json = message_metadata(msg)
+        if not metadata_type:
+            continue
+        msg["metadata_type"] = metadata_type
+        msg["metadata_title"] = title
+        msg["metadata_url"] = url
+        msg["metadata_json"] = raw_json
+        count += 1
+    return count
+
+
 def stable_int(*parts: object) -> int:
     digest = hashlib.sha256(":".join(str(part) for part in parts).encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF
@@ -723,7 +879,7 @@ def filter_chat(messages: list[dict[str, Any]], chat_id: str) -> list[dict[str, 
     return [msg for msg in messages if msg["chat_id"] == chat_id or msg.get("_raw_chat_id") == chat_id]
 
 
-def import_source(source: PostboxSource, passcodes: list[bytes], multi_account: bool) -> tuple[dict[str, str], list[dict[str, Any]]]:
+def import_source(source: PostboxSource, passcodes: list[bytes], multi_account: bool) -> tuple[dict[str, str], list[dict[str, Any]], list[dict[str, Any]]]:
     key = parse_tempkey(source.key_path, passcodes)
     conn = connect_postbox(source.db_path, key)
     try:
@@ -826,6 +982,8 @@ def remote_media_candidates(messages: list[dict[str, Any]]) -> list[dict[str, An
     candidates = []
     for msg in messages:
         if msg.get("media_path") or not msg.get("media_type"):
+            continue
+        if not message_resource_ids(msg):
             continue
         if cloud_media_key(msg) is None:
             continue
@@ -1128,10 +1286,12 @@ def download_remote_media(
 def build_result(
     source_path: str,
     peers: dict[str, str],
+    contacts: list[dict[str, Any]],
     messages: list[dict[str, Any]],
     started: dt.datetime,
     remote_media: dict[str, int] | None = None,
 ) -> dict[str, Any]:
+    attach_message_metadata(messages)
     clear_unarchived_placeholder_media(messages)
     chats: dict[str, dict[str, Any]] = {}
     for msg in messages:
@@ -1162,6 +1322,7 @@ def build_result(
         "finished_at": finished.isoformat().replace("+00:00", "Z"),
         "remote_media": remote_media or {"downloaded": 0, "missing": 0},
         "chats": sorted(chats.values(), key=lambda c: c["last_message_at"], reverse=True),
+        "contacts": sorted(contacts, key=lambda c: c["id"]),
         "folders": [],
         "folder_chats": [],
         "topics": [],
@@ -1195,6 +1356,10 @@ def fixture_kv_int64(key: str, value: int) -> bytes:
     return fixture_short_str(key) + struct.pack("<Bq", 1, value)
 
 
+def fixture_kv_double(key: str, value: float) -> bytes:
+    return fixture_short_str(key) + struct.pack("<Bd", 3, value)
+
+
 def fixture_kv_object(key: str, payload: bytes, type_hash: int) -> bytes:
     return fixture_short_str(key) + struct.pack("B", 5) + fixture_object(payload, type_hash)
 
@@ -1211,8 +1376,13 @@ def fixture_root_typed_object(payload: bytes, type_hash: int) -> bytes:
     return fixture_short_str("_") + struct.pack("B", 5) + fixture_object(payload, type_hash)
 
 
-def fixture_peer(first: str, last: str = "") -> bytes:
-    return fixture_root_object(fixture_kv_string("fn", first) + fixture_kv_string("ln", last))
+def fixture_peer(first: str, last: str = "", username: str = "", phone: str = "") -> bytes:
+    payload = fixture_kv_string("fn", first) + fixture_kv_string("ln", last)
+    if username:
+        payload += fixture_kv_string("un", username)
+    if phone:
+        payload += fixture_kv_string("p", phone)
+    return fixture_root_object(payload)
 
 
 def fixture_message(
@@ -1274,6 +1444,30 @@ def fixture_photo_media(photo_id: int = 123456789) -> bytes:
         + fixture_kv_object("large", large, RESOURCE_TYPE_CLOUD_PHOTO_SIZE)
     )
     return fixture_root_typed_object(media, -1951522668)
+
+
+def fixture_webpage_media() -> bytes:
+    media = fixture_kv_string("u", "https://example.com/article") + fixture_kv_string("ti", "Example Article")
+    return fixture_root_typed_object(media, MESSAGE_METADATA_WEBPAGE)
+
+
+def fixture_location_media() -> bytes:
+    media = (
+        fixture_kv_double("la", 52.1)
+        + fixture_kv_double("lo", 4.3)
+        + fixture_kv_string("adr", "Example Place")
+    )
+    return fixture_root_typed_object(media, MESSAGE_METADATA_LOCATION)
+
+
+def fixture_poll_media() -> bytes:
+    media = fixture_kv_string("t", "Example Poll")
+    return fixture_root_typed_object(media, MESSAGE_METADATA_POLL)
+
+
+def fixture_service_action_media() -> bytes:
+    media = fixture_kv_int32("d", 42) + fixture_kv_int32("dr", 10)
+    return fixture_root_typed_object(media, MESSAGE_METADATA_SERVICE_ACTION)
 
 
 def fixture_message_key(peer_id: int, namespace: int, timestamp: int, message_id: int) -> bytes:
@@ -1409,12 +1603,14 @@ def run_self_test(fixture_dir: str) -> None:
         raise AssertionError("channel peer id conversion failed")
     if postbox_peer_to_telethon_id(fixture_postbox_peer_id(3, 42)) is not None:
         raise AssertionError("secret chat peer id should not be remotely fetched")
+    remote_resource = PostboxDecoder(fixture_photo_media(77)).decode_root_object()
     remote_sample = [
-        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:1", "media_type": "photo", "media_path": ""},
-        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:2", "media_type": "photo", "media_path": "cached"},
-        {"_raw_chat_id": str(fixture_postbox_peer_id(3, 42)), "message_id": "0:3", "media_type": "photo", "media_path": ""},
-        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "1:4", "media_type": "photo", "media_path": ""},
-        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:5", "media_type": "", "media_path": ""},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:1", "media_type": "photo", "media_path": "", "embedded_media": [remote_resource]},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:2", "media_type": "photo", "media_path": "cached", "embedded_media": [remote_resource]},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(3, 42)), "message_id": "0:3", "media_type": "photo", "media_path": "", "embedded_media": [remote_resource]},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "1:4", "media_type": "photo", "media_path": "", "embedded_media": [remote_resource]},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:5", "media_type": "", "media_path": "", "embedded_media": [remote_resource]},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:6", "media_type": "web_page", "media_path": "", "embedded_media": []},
     ]
     if [row["message_id"] for row in remote_media_candidates(remote_sample)] != ["0:1"]:
         raise AssertionError(f"remote media candidate selection failed: {remote_sample!r}")
@@ -1442,6 +1638,26 @@ def run_self_test(fixture_dir: str) -> None:
         raise AssertionError(f"placeholder clear count failed: {placeholder_sample!r}")
     if [row["media_type"] for row in placeholder_sample] != ["", "", "web_page", "photo"]:
         raise AssertionError(f"placeholder media clear failed: {placeholder_sample!r}")
+
+    metadata_sample = [
+        {"text": "", "media_type": "web_page", "embedded_media": [PostboxDecoder(fixture_webpage_media()).decode_root_object()]},
+        {"text": "", "media_type": "media", "embedded_media": [PostboxDecoder(fixture_location_media()).decode_root_object()]},
+        {"text": "", "media_type": "media", "embedded_media": [PostboxDecoder(fixture_poll_media()).decode_root_object()]},
+        {"text": "", "media_type": "media", "embedded_media": [PostboxDecoder(fixture_service_action_media()).decode_root_object()]},
+        {"text": "see https://example.com/from-text.", "media_type": "web_page", "embedded_media": []},
+    ]
+    if attach_message_metadata(metadata_sample) != 5:
+        raise AssertionError(f"metadata attach count failed: {metadata_sample!r}")
+    if [row["metadata_type"] for row in metadata_sample] != ["web_page", "location", "poll", "service_action", "web_page"]:
+        raise AssertionError(f"metadata type decode failed: {metadata_sample!r}")
+    if metadata_sample[0]["metadata_url"] != "https://example.com/article":
+        raise AssertionError(f"web page URL decode failed: {metadata_sample!r}")
+    if metadata_sample[1]["metadata_title"] != "Example Place" or metadata_sample[2]["metadata_title"] != "Example Poll":
+        raise AssertionError(f"location/poll metadata title failed: {metadata_sample!r}")
+    if metadata_sample[3]["metadata_title"] != "call":
+        raise AssertionError(f"service metadata title failed: {metadata_sample!r}")
+    if metadata_sample[4]["metadata_url"] != "https://example.com/from-text":
+        raise AssertionError(f"text URL metadata failed: {metadata_sample!r}")
     import_module = importlib.import_module
     try:
         def missing_telethon(name: str, package: str | None = None) -> Any:
@@ -1552,21 +1768,23 @@ def run_self_test(fixture_dir: str) -> None:
     ]
     public_connections = [
         FixturePostboxConnection(
-            {100: fixture_peer("Fixture", "A"), 4242: fixture_peer("Sender", "A")},
+            {100: fixture_peer("Fixture", "A"), 4242: fixture_peer("Sender", "A", "sendera", "+15550000001")},
             [(fixture_message_key(100, 0, 1_421_404_800, 1), fixture_message("public account a"))],
         ),
         FixturePostboxConnection(
-            {100: fixture_peer("Fixture", "B"), 4242: fixture_peer("Sender", "B")},
+            {100: fixture_peer("Fixture", "B"), 4242: fixture_peer("Sender", "B", "senderb", "+15550000002")},
             [(fixture_message_key(100, 0, 1_421_404_801, 1), fixture_message("public account b"))],
         ),
     ]
     public_peers: dict[str, str] = {}
+    public_contacts: list[dict[str, Any]] = []
     public_messages: list[dict[str, Any]] = []
     if len(public_sources) != len(public_connections):
         raise AssertionError("public fixture source/connection mismatch")
     for source, conn in zip(public_sources, public_connections):
-        peers, messages = read_source_records(source, conn, multi_account=True)
+        peers, contacts, messages = read_source_records(source, conn, multi_account=True)
         public_peers.update(peers)
+        public_contacts.extend(contacts)
         public_messages.extend(messages)
     public_filtered = filter_chat(public_messages, "100")
     if len(public_filtered) != 2:
@@ -1575,9 +1793,13 @@ def run_self_test(fixture_dir: str) -> None:
         raise AssertionError("public multi-account import collapsed distinct chats")
     if public_filtered[0]["source_pk"] == public_filtered[1]["source_pk"]:
         raise AssertionError("public multi-account import collided source keys")
-    public_result = build_result("fixture-postbox", public_peers, public_filtered, dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc))
+    public_result = build_result("fixture-postbox", public_peers, public_contacts, public_filtered, dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc))
     if len(public_result["chats"]) != 2 or len(public_result["messages"]) != 2:
         raise AssertionError(f"public import result shape failed: {public_result!r}")
+    if len(public_result["contacts"]) != 4:
+        raise AssertionError(f"public contacts shape failed: {public_result!r}")
+    if not any(contact["phone"] == "+15550000001" and contact["username"] == "sendera" for contact in public_result["contacts"]):
+        raise AssertionError(f"public contact enrichment failed: {public_result!r}")
     if any("embedded_media" in msg for msg in public_result["messages"]):
         raise AssertionError(f"public import leaked internal media records: {public_result!r}")
     if {msg["text"] for msg in public_result["messages"]} != {"public account a", "public account b"}:
@@ -1614,10 +1836,13 @@ def main() -> None:
     multi_account = len(sources) > 1
     sources_by_account = {source.account_id: source for source in sources}
     all_peers: dict[str, str] = {}
+    all_contacts: dict[str, dict[str, Any]] = {}
     by_identity: dict[tuple[str, str, str], dict[str, Any]] = {}
     for source in sources:
-        peers, messages = import_source(source, passcodes, multi_account)
+        peers, contacts, messages = import_source(source, passcodes, multi_account)
         all_peers.update(peers)
+        for contact in contacts:
+            all_contacts[contact["id"]] = contact
         for msg in messages:
             by_identity[(source.account_id, msg["chat_id"], msg["message_id"])] = msg
 
@@ -1636,7 +1861,7 @@ def main() -> None:
         share_duplicate_media(limited)
         share_resource_media(limited)
     source_path = str(Path(args.source).expanduser()) if args.source else str(default_group_path())
-    json.dump(build_result(source_path, all_peers, limited, started, remote_media), sys.stdout, separators=(",", ":"))
+    json.dump(build_result(source_path, all_peers, list(all_contacts.values()), limited, started, remote_media), sys.stdout, separators=(",", ":"))
 
 
 if __name__ == "__main__":

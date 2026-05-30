@@ -47,6 +47,7 @@ create table if not exists topics (
 
 create table if not exists contacts (
 	jid text primary key,
+	peer_type text,
 	phone text,
 	full_name text,
 	first_name text,
@@ -55,6 +56,7 @@ create table if not exists contacts (
 	username text,
 	lid text,
 	about_text text,
+	avatar_path text,
 	updated_at integer
 );
 
@@ -93,6 +95,10 @@ create table if not exists messages (
 	media_path text,
 	media_url text,
 	media_size integer,
+	metadata_type text,
+	metadata_title text,
+	metadata_url text,
+	metadata_json text,
 	starred integer not null default 0,
 	topic_id text,
 	reply_to_msg_id text,

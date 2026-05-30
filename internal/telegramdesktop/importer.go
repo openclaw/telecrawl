@@ -46,6 +46,7 @@ type ExistingMediaRef struct {
 
 type ImportResult struct {
 	Stats       store.ImportStats
+	Contacts    []store.Contact
 	Chats       []store.Chat
 	Folders     []store.Folder
 	FolderChats []store.FolderChat
@@ -77,6 +78,20 @@ type pyResult struct {
 		FolderID      string `json:"folder_id"`
 		Forum         bool   `json:"forum"`
 	} `json:"chats"`
+	Contacts []struct {
+		ID           string `json:"id"`
+		PeerType     string `json:"peer_type"`
+		Phone        string `json:"phone"`
+		FullName     string `json:"full_name"`
+		FirstName    string `json:"first_name"`
+		LastName     string `json:"last_name"`
+		BusinessName string `json:"business_name"`
+		Username     string `json:"username"`
+		LID          string `json:"lid"`
+		AboutText    string `json:"about_text"`
+		AvatarPath   string `json:"avatar_path"`
+		UpdatedAt    string `json:"updated_at"`
+	} `json:"contacts"`
 	Folders []struct {
 		ID        string `json:"id"`
 		Title     string `json:"title"`
@@ -124,6 +139,10 @@ type pyResult struct {
 		MediaTitle       string `json:"media_title"`
 		MediaPath        string `json:"media_path"`
 		MediaSize        int64  `json:"media_size"`
+		MetadataType     string `json:"metadata_type"`
+		MetadataTitle    string `json:"metadata_title"`
+		MetadataURL      string `json:"metadata_url"`
+		MetadataJSON     string `json:"metadata_json"`
 		Views            int    `json:"views"`
 		Forwards         int    `json:"forwards"`
 		RepliesCount     int    `json:"replies_count"`
@@ -356,6 +375,22 @@ func decodeImportResult(raw pyResult, dbPath string) ImportResult {
 			Forum:         c.Forum,
 		})
 	}
+	for _, c := range raw.Contacts {
+		result.Contacts = append(result.Contacts, store.Contact{
+			JID:          c.ID,
+			PeerType:     c.PeerType,
+			Phone:        c.Phone,
+			FullName:     c.FullName,
+			FirstName:    c.FirstName,
+			LastName:     c.LastName,
+			BusinessName: c.BusinessName,
+			Username:     c.Username,
+			LID:          c.LID,
+			AboutText:    c.AboutText,
+			AvatarPath:   c.AvatarPath,
+			UpdatedAt:    parseTime(c.UpdatedAt),
+		})
+	}
 	for _, f := range raw.Folders {
 		result.Folders = append(result.Folders, store.Folder{
 			ID:        f.ID,
@@ -410,6 +445,10 @@ func decodeImportResult(raw pyResult, dbPath string) ImportResult {
 			MediaTitle:    m.MediaTitle,
 			MediaPath:     m.MediaPath,
 			MediaSize:     m.MediaSize,
+			MetadataType:  m.MetadataType,
+			MetadataTitle: m.MetadataTitle,
+			MetadataURL:   m.MetadataURL,
+			MetadataJSON:  m.MetadataJSON,
 			Views:         m.Views,
 			Forwards:      m.Forwards,
 			RepliesCount:  m.RepliesCount,
