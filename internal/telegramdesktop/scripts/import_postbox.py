@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Import native Telegram for macOS Postbox data.
 
-This bridge is intentionally offline: it reads .tempkeyEncrypted plus local
-Postbox db_sqlite files and emits Telecrawl's importer JSON on stdout.
+This bridge reads .tempkeyEncrypted plus local Postbox db_sqlite files and
+emits Telecrawl's importer JSON on stdout. With --fetch-media, it can also fetch
+missing cloud media from an existing native account auth key without launching
+Telegram or starting an interactive login flow.
 
 Parts of the SQLCipher/Postbox decoding logic are adapted from
 telegram-message-exporter, Copyright (c) 2026 Simon Oakes, MIT licensed.
@@ -12,6 +14,8 @@ See import_postbox.LICENSE for the upstream license notice.
 from __future__ import annotations
 
 import argparse
+import asyncio
+import base64
 import datetime as dt
 import hashlib
 import importlib
@@ -20,6 +24,7 @@ import json
 import os
 import struct
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -28,6 +33,7 @@ from typing import Any, Iterable
 TEMPKEY_MURMUR_SEED = 0xF7CA7FD2
 DEFAULT_PASSCODE = b"no-matter-key"
 INCOMING_FLAG = 4
+MEDIA_CACHE_INDEXES: dict[str, dict[str, list[Path]]] = {}
 MEDIA_TAGS = {
     1 << 0: "photo_or_video",
     1 << 1: "file",
@@ -38,6 +44,21 @@ MEDIA_TAGS = {
     1 << 8: "photo",
     1 << 9: "video",
 }
+RESOURCE_TYPE_CLOUD_PHOTO_SIZE = 1226791958
+RESOURCE_TYPE_CLOUD_DOCUMENT_SIZE = -2129249780
+RESOURCE_TYPE_CLOUD_DOCUMENT = 486562374
+RESOURCE_TYPE_LOCAL_FILE = 711798229
+RESOURCE_TYPE_LOCAL_FILE_REFERENCE = 1868491758
+# Public Telegram for macOS app identity from TelegramSwift.
+TELEGRAM_MAC_API_ID = 9
+TELEGRAM_MAC_API_HASH = "3975f648bb682ee889f35483bc618d1c"  # gitleaks:allow
+DC_ENDPOINTS = {
+    1: ("149.154.175.53", 443),
+    2: ("149.154.167.51", 443),
+    3: ("149.154.175.100", 443),
+    4: ("149.154.167.91", 443),
+    5: ("91.108.56.130", 443),
+}
 
 
 @dataclass(frozen=True)
@@ -45,6 +66,15 @@ class PostboxSource:
     account_id: str
     key_path: Path
     db_path: Path
+
+
+@dataclass(frozen=True)
+class NativeSession:
+    account_id: str
+    dc_id: int
+    auth_key: bytes
+    host: str
+    port: int
 
 
 class ByteReader:
@@ -280,6 +310,81 @@ def discover_sources(source_arg: str | None) -> list[PostboxSource]:
     return sources
 
 
+def account_dir_record_id(account_dir: str) -> int:
+    if not account_dir.startswith("account-"):
+        raise ValueError(f"invalid account directory: {account_dir}")
+    value = int(account_dir.removeprefix("account-"))
+    if value >= 1 << 63:
+        value -= 1 << 64
+    return value
+
+
+def dict_pairs(value: Any) -> Iterable[tuple[Any, Any]]:
+    if isinstance(value, list):
+        return zip(value[0::2], value[1::2])
+    if isinstance(value, dict):
+        return value.items()
+    return []
+
+
+def native_session_for_source(source: PostboxSource) -> NativeSession | None:
+    account_path = source.db_path.parent.parent.parent
+    lane_path = account_path.parent
+    shared_path = lane_path / "accounts-shared-data"
+    if not shared_path.exists():
+        return None
+    try:
+        account_record_id = account_dir_record_id(account_path.name)
+        shared = json.loads(shared_path.read_text())
+    except Exception:
+        return None
+    for account in shared.get("accounts") or []:
+        if int(account.get("id", 0)) != account_record_id:
+            continue
+        dc_id = int(account.get("primaryId", 0))
+        host, port = DC_ENDPOINTS.get(dc_id, ("", 0))
+        if not host:
+            return None
+        datacenters = {int(key): value for key, value in dict_pairs(account.get("datacenters"))}
+        datacenter = datacenters.get(dc_id)
+        if not isinstance(datacenter, dict):
+            return None
+        key_data = ((datacenter.get("masterKey") or {}).get("data") or "").strip()
+        if not key_data:
+            return None
+        try:
+            auth_key = base64.b64decode(key_data)
+        except Exception:
+            return None
+        if len(auth_key) != 256:
+            return None
+        return NativeSession(source.account_id, dc_id, auth_key, host, port)
+    return None
+
+
+def postbox_peer_to_telethon_id(peer_id: int) -> int | None:
+    data = peer_id & ((1 << 64) - 1)
+    legacy_namespace_bits = (data >> 32) & 0xFFFFFFFF
+    id_low_bits = data & 0xFFFFFFFF
+    if legacy_namespace_bits == 0x7FFFFFFF and id_low_bits == 0:
+        return None
+    namespace = (data >> 32) & 0x7
+    id_high_bits = ((data >> 35) & 0xFFFFFFFF) << 32
+    if id_high_bits == 0 and namespace == 3:
+        raw_id = id_low_bits - (1 << 32) if id_low_bits >= 1 << 31 else id_low_bits
+    else:
+        raw_id = id_high_bits | id_low_bits
+        if raw_id >= 1 << 63:
+            raw_id -= 1 << 64
+    if namespace == 0:
+        return raw_id
+    if namespace == 1:
+        return -raw_id
+    if namespace == 2:
+        return -1_000_000_000_000 - raw_id
+    return None
+
+
 def peer_display(peer: Any) -> str:
     if not isinstance(peer, dict):
         return ""
@@ -315,6 +420,7 @@ def read_source_records(source: PostboxSource, conn: Any, multi_account: bool) -
         for peer_id, display in raw_peers.items()
     }
     messages: list[dict[str, Any]] = []
+    media_root = source.db_path.parent.parent / "media"
     for key_blob, value in conn.execute("SELECT key, value FROM t7 ORDER BY key"):
         if not isinstance(key_blob, bytes) or len(key_blob) < 20 or not isinstance(value, bytes):
             continue
@@ -330,6 +436,7 @@ def read_source_records(source: PostboxSource, conn: Any, multi_account: bool) -
         incoming = bool(int(msg["flags"]) & INCOMING_FLAG)
         author_id = msg.get("author_id")
         media_type = media_type_for(msg)
+        media_path, media_size = cached_media_for(msg, media_root)
         if author_id:
             sender_id = peer_store_id(source.account_id, author_id, multi_account)
             sender_name = raw_peers.get(author_id, "")
@@ -340,6 +447,7 @@ def read_source_records(source: PostboxSource, conn: Any, multi_account: bool) -
             sender_id = ""
             sender_name = ""
         messages.append({
+            "_account_id": source.account_id,
             "_ts": timestamp,
             "_raw_chat_id": str(peer_id),
             "source_pk": source_pk(source.account_id, peer_id, namespace, message_id, multi_account),
@@ -353,6 +461,9 @@ def read_source_records(source: PostboxSource, conn: Any, multi_account: bool) -
             "text": msg.get("text") or "",
             "message_type": "message",
             "media_type": media_type,
+            "media_title": media_title_for(msg),
+            "media_path": media_path,
+            "media_size": media_size,
         })
     return peers, messages
 
@@ -406,8 +517,12 @@ def read_message(value: bytes) -> dict[str, Any] | None:
     for _ in range(reader.read_int32()):
         reader.read_bytes()
     embedded_media_count = reader.read_int32()
+    embedded_media: list[Any] = []
     for _ in range(embedded_media_count):
-        reader.read_bytes()
+        try:
+            embedded_media.append(PostboxDecoder(reader.read_bytes()).decode_root_object())
+        except Exception:
+            continue
     referenced_media_ids = []
     for _ in range(reader.read_int32()):
         referenced_media_ids.append((reader.read_int32(), reader.read_int64()))
@@ -417,6 +532,7 @@ def read_message(value: bytes) -> dict[str, Any] | None:
         "author_id": author_id,
         "text": text,
         "embedded_media_count": embedded_media_count,
+        "embedded_media": embedded_media,
         "referenced_media_ids": referenced_media_ids,
     }
 
@@ -428,6 +544,107 @@ def media_type_for(msg: dict[str, Any]) -> str:
             return label
     if msg.get("embedded_media_count") or msg.get("referenced_media_ids"):
         return "media"
+    return ""
+
+
+def media_resource_ids(value: Any) -> list[str]:
+    ids: list[str] = []
+
+    def visit(item: Any) -> None:
+        if isinstance(item, dict):
+            resource_type = item.get("@type")
+            if resource_type == RESOURCE_TYPE_CLOUD_PHOTO_SIZE:
+                ids.append(f"telegram-cloud-photo-size-{item.get('d')}-{item.get('i')}-{item.get('s')}")
+            elif resource_type == RESOURCE_TYPE_CLOUD_DOCUMENT_SIZE:
+                ids.append(f"telegram-cloud-document-size-{item.get('d')}-{item.get('i')}-{item.get('s')}")
+            elif resource_type == RESOURCE_TYPE_CLOUD_DOCUMENT:
+                ids.append(f"telegram-cloud-document-{item.get('d')}-{item.get('f')}")
+            elif resource_type == RESOURCE_TYPE_LOCAL_FILE:
+                ids.append(f"telegram-local-file-{item.get('f')}")
+            elif resource_type == RESOURCE_TYPE_LOCAL_FILE_REFERENCE:
+                ids.append(f"local-file-{item.get('r')}")
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return list(dict.fromkeys(resource_id for resource_id in ids if resource_id and "None" not in resource_id))
+
+
+def cached_media_for(msg: dict[str, Any], media_root: Path) -> tuple[str, int]:
+    candidates: list[tuple[int, Path]] = []
+    for item in msg.get("embedded_media") or []:
+        for resource_id in media_resource_ids(item):
+            for path in cached_media_paths(resource_id, media_root):
+                candidates.append((path.stat().st_size, path))
+    if not candidates:
+        return "", 0
+    size, path = max(candidates, key=lambda item: item[0])
+    return str(path), size
+
+
+def cached_media_paths(resource_id: str, media_root: Path) -> list[Path]:
+    paths: list[Path] = []
+    exact = media_root / resource_id
+    if is_complete_cache_file(exact, resource_id):
+        paths.append(exact)
+    paths.extend(media_cache_index(media_root).get(resource_id, []))
+    return paths
+
+
+def media_cache_index(media_root: Path) -> dict[str, list[Path]]:
+    key = str(media_root)
+    if key in MEDIA_CACHE_INDEXES:
+        return MEDIA_CACHE_INDEXES[key]
+    index: dict[str, list[Path]] = {}
+    try:
+        entries = list(media_root.iterdir())
+    except OSError:
+        MEDIA_CACHE_INDEXES[key] = index
+        return index
+    for path in entries:
+        name = path.name
+        if "." not in name or "_partial" in name or name.endswith(".meta") or not path.is_file():
+            continue
+        resource_id = name.rsplit(".", 1)[0]
+        if resource_id:
+            index.setdefault(resource_id, []).append(path)
+    MEDIA_CACHE_INDEXES[key] = index
+    return index
+
+
+def is_complete_cache_file(path: Path, resource_id: str) -> bool:
+    name = path.name
+    if name != resource_id and not name.startswith(f"{resource_id}."):
+        return False
+    if "_partial" in name or name.endswith(".meta"):
+        return False
+    return path.is_file()
+
+
+def media_title_for(msg: dict[str, Any]) -> str:
+    def visit(item: Any) -> str:
+        if isinstance(item, dict):
+            value = item.get("fn")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            for nested in item.values():
+                found = visit(nested)
+                if found:
+                    return found
+        elif isinstance(item, list):
+            for nested in item:
+                found = visit(nested)
+                if found:
+                    return found
+        return ""
+
+    for item in msg.get("embedded_media") or []:
+        found = visit(item)
+        if found:
+            return found
     return ""
 
 
@@ -484,11 +701,206 @@ def import_source(source: PostboxSource, passcodes: list[bytes], multi_account: 
         conn.close()
 
 
-def build_result(source_path: str, peers: dict[str, str], messages: list[dict[str, Any]], started: dt.datetime) -> dict[str, Any]:
+def cloud_message_id(message_id: str) -> int | None:
+    try:
+        namespace, raw_id = message_id.split(":", 1)
+        if int(namespace) != 0:
+            return None
+        value = int(raw_id)
+    except Exception:
+        return None
+    return value if value > 0 else None
+
+
+def cloud_media_key(msg: dict[str, Any]) -> tuple[int, int] | None:
+    message_id = cloud_message_id(str(msg.get("message_id") or ""))
+    if message_id is None:
+        return None
+    try:
+        peer_id = postbox_peer_to_telethon_id(int(msg.get("_raw_chat_id") or 0))
+    except Exception:
+        return None
+    if peer_id is None:
+        return None
+    return peer_id, message_id
+
+
+def duplicate_media_key(msg: dict[str, Any]) -> tuple[str, int, int, str, str, str] | None:
+    key = cloud_media_key(msg)
+    if key is None:
+        return None
+    return (
+        str(msg.get("_account_id") or ""),
+        key[0],
+        key[1],
+        str(msg.get("timestamp") or ""),
+        str(msg.get("media_type") or ""),
+        str(msg.get("media_title") or ""),
+    )
+
+
+def share_duplicate_media(messages: list[dict[str, Any]]) -> int:
+    known: dict[tuple[str, int, int, str, str, str], tuple[str, int]] = {}
+    for msg in messages:
+        key = duplicate_media_key(msg)
+        media_path = str(msg.get("media_path") or "")
+        if key is None or not media_path:
+            continue
+        known.setdefault(key, (media_path, int(msg.get("media_size") or 0)))
+
+    filled = 0
+    for msg in messages:
+        if msg.get("media_path") or not msg.get("media_type"):
+            continue
+        key = duplicate_media_key(msg)
+        if key is None or key not in known:
+            continue
+        msg["media_path"], msg["media_size"] = known[key]
+        filled += 1
+    return filled
+
+
+def remote_media_candidates(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates = []
+    for msg in messages:
+        if msg.get("media_path") or not msg.get("media_type"):
+            continue
+        if cloud_media_key(msg) is None:
+            continue
+        candidates.append(msg)
+    return candidates
+
+
+def remote_media_missing_count(messages: list[dict[str, Any]]) -> int:
+    return len({key for msg in remote_media_candidates(messages) if (key := duplicate_media_key(msg)) is not None})
+
+
+async def download_remote_media_for_account(
+    native_session: NativeSession,
+    messages: list[dict[str, Any]],
+    output_dir: Path,
+    telethon: Any,
+) -> dict[str, int]:
+    from telethon.crypto import AuthKey
+    from telethon.sessions import SQLiteSession
+
+    session_dir = output_dir / ".sessions"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session_path = session_dir / hashlib.sha256(native_session.account_id.encode("utf-8")).hexdigest()
+    session = SQLiteSession(str(session_path))
+    session.set_dc(native_session.dc_id, native_session.host, native_session.port)
+    session.auth_key = AuthKey(native_session.auth_key)
+    session.save()
+
+    client = telethon.TelegramClient(session, TELEGRAM_MAC_API_ID, TELEGRAM_MAC_API_HASH, receive_updates=False)
+    downloaded = 0
+    dialogs_loaded = False
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            return {"downloaded": 0}
+        for msg in messages:
+            peer_id = postbox_peer_to_telethon_id(int(msg.get("_raw_chat_id") or 0))
+            message_id = cloud_message_id(str(msg.get("message_id") or ""))
+            if peer_id is None or message_id is None:
+                continue
+            try:
+                telegram_message = await client.get_messages(peer_id, ids=message_id)
+            except Exception:
+                if dialogs_loaded:
+                    continue
+                try:
+                    await client.get_dialogs(limit=None)
+                    dialogs_loaded = True
+                    telegram_message = await client.get_messages(peer_id, ids=message_id)
+                except Exception:
+                    continue
+            if not telegram_message or not getattr(telegram_message, "media", None):
+                continue
+            message_dir = output_dir / hashlib.sha256(
+                f"{native_session.account_id}:{msg['source_pk']}".encode("utf-8")
+            ).hexdigest()
+            message_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                path = await client.download_media(telegram_message, file=str(message_dir))
+            except Exception:
+                continue
+            if path and Path(path).is_file():
+                msg["media_path"] = str(path)
+                msg["media_size"] = Path(path).stat().st_size
+                downloaded += 1
+    finally:
+        await client.disconnect()
+    return {"downloaded": downloaded}
+
+
+async def download_remote_media_async(
+    messages: list[dict[str, Any]],
+    sources_by_account: dict[str, PostboxSource],
+    output_dir: Path,
+    telethon: Any,
+) -> dict[str, int]:
+    share_duplicate_media(messages)
+    candidates = remote_media_candidates(messages)
+    if not candidates:
+        return {"downloaded": 0, "missing": 0}
+    sessions = {
+        account_id: native_session
+        for account_id, source in sources_by_account.items()
+        if (native_session := native_session_for_source(source)) is not None
+    }
+    if not sessions:
+        return {"downloaded": 0, "missing": remote_media_missing_count(messages)}
+
+    downloaded = 0
+    by_account: dict[str, list[dict[str, Any]]] = {}
+    for msg in candidates:
+        by_account.setdefault(str(msg.get("_account_id") or ""), []).append(msg)
+    for account_id, rows in by_account.items():
+        native_session = sessions.get(account_id)
+        if native_session is None:
+            continue
+        try:
+            result = await download_remote_media_for_account(native_session, rows, output_dir, telethon)
+        except Exception:
+            continue
+        downloaded += result["downloaded"]
+        share_duplicate_media(messages)
+    return {"downloaded": downloaded, "missing": remote_media_missing_count(messages)}
+
+
+def download_remote_media(
+    messages: list[dict[str, Any]],
+    sources_by_account: dict[str, PostboxSource],
+    media_output_dir: str,
+) -> dict[str, int]:
+    missing = remote_media_missing_count(messages)
+    if not media_output_dir or missing == 0:
+        return {"downloaded": 0, "missing": missing}
+    try:
+        telethon = importlib.import_module("telethon")
+    except ImportError:
+        return {"downloaded": 0, "missing": missing}
+    output_dir = Path(media_output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        return asyncio.run(download_remote_media_async(messages, sources_by_account, output_dir, telethon))
+    except Exception:
+        return {"downloaded": 0, "missing": remote_media_missing_count(messages)}
+
+
+def build_result(
+    source_path: str,
+    peers: dict[str, str],
+    messages: list[dict[str, Any]],
+    started: dt.datetime,
+    remote_media: dict[str, int] | None = None,
+) -> dict[str, Any]:
     chats: dict[str, dict[str, Any]] = {}
     for msg in messages:
         msg.pop("_ts", None)
         msg.pop("_raw_chat_id", None)
+        msg.pop("_account_id", None)
         chat_id = msg["chat_id"]
         chat = chats.setdefault(chat_id, {
             "id": chat_id,
@@ -509,6 +921,7 @@ def build_result(source_path: str, peers: dict[str, str], messages: list[dict[st
         "source_path": source_path,
         "started_at": started.isoformat().replace("+00:00", "Z"),
         "finished_at": finished.isoformat().replace("+00:00", "Z"),
+        "remote_media": remote_media or {"downloaded": 0, "missing": 0},
         "chats": sorted(chats.values(), key=lambda c: c["last_message_at"], reverse=True),
         "folders": [],
         "folder_chats": [],
@@ -535,12 +948,28 @@ def fixture_kv_string(key: str, value: str) -> bytes:
     return fixture_short_str(key) + struct.pack("B", 4) + fixture_string(value)
 
 
+def fixture_kv_int32(key: str, value: int) -> bytes:
+    return fixture_short_str(key) + struct.pack("<Bi", 0, value)
+
+
+def fixture_kv_int64(key: str, value: int) -> bytes:
+    return fixture_short_str(key) + struct.pack("<Bq", 1, value)
+
+
+def fixture_kv_object(key: str, payload: bytes, type_hash: int) -> bytes:
+    return fixture_short_str(key) + struct.pack("B", 5) + fixture_object(payload, type_hash)
+
+
 def fixture_object(payload: bytes, type_hash: int = 0x12345678) -> bytes:
     return struct.pack("<ii", type_hash, len(payload)) + payload
 
 
 def fixture_root_object(payload: bytes) -> bytes:
     return fixture_short_str("_") + struct.pack("B", 5) + fixture_object(payload)
+
+
+def fixture_root_typed_object(payload: bytes, type_hash: int) -> bytes:
+    return fixture_short_str("_") + struct.pack("B", 5) + fixture_object(payload, type_hash)
 
 
 def fixture_peer(first: str, last: str = "") -> bytes:
@@ -551,8 +980,11 @@ def fixture_message(
     text: str = "fixture hello",
     author_id: int | None = 4242,
     tags: int = 1 << 0,
+    embedded_media: list[bytes] | None = None,
     referenced_media_ids: list[tuple[int, int]] | None = None,
 ) -> bytes:
+    if embedded_media is None:
+        embedded_media = []
     if referenced_media_ids is None:
         referenced_media_ids = [(7, 123456789)]
     out = bytearray()
@@ -564,15 +996,54 @@ def fixture_message(
         out += struct.pack("<bq", 1, author_id)
     out += fixture_string(text)
     out += struct.pack("<i", 0)
-    out += struct.pack("<i", 0)
+    out += struct.pack("<i", len(embedded_media))
+    for media in embedded_media:
+        out += fixture_bytes(media)
     out += struct.pack("<i", len(referenced_media_ids))
     for namespace, media_id in referenced_media_ids:
         out += struct.pack("<iq", namespace, media_id)
     return bytes(out)
 
 
+def fixture_document_media(file_id: int = 987654321, file_name: str = "fixture.mp4") -> bytes:
+    resource = (
+        fixture_kv_int32("d", 2)
+        + fixture_kv_int64("f", file_id)
+        + fixture_kv_int64("a", 123)
+        + fixture_kv_int64("n64", 5)
+        + fixture_kv_string("fn", file_name)
+    )
+    media = fixture_kv_object("r", resource, RESOURCE_TYPE_CLOUD_DOCUMENT) + fixture_kv_string("mt", "video/mp4")
+    return fixture_root_typed_object(media, 665733176)
+
+
+def fixture_photo_media(photo_id: int = 123456789) -> bytes:
+    small = (
+        fixture_kv_int32("d", 4)
+        + fixture_kv_int64("i", photo_id)
+        + fixture_kv_int64("a", 321)
+        + fixture_kv_string("s", "s")
+    )
+    large = (
+        fixture_kv_int32("d", 4)
+        + fixture_kv_int64("i", photo_id)
+        + fixture_kv_int64("a", 321)
+        + fixture_kv_string("s", "x")
+    )
+    media = (
+        fixture_kv_object("small", small, RESOURCE_TYPE_CLOUD_PHOTO_SIZE)
+        + fixture_kv_object("large", large, RESOURCE_TYPE_CLOUD_PHOTO_SIZE)
+    )
+    return fixture_root_typed_object(media, -1951522668)
+
+
 def fixture_message_key(peer_id: int, namespace: int, timestamp: int, message_id: int) -> bytes:
     return struct.pack(">qiii", peer_id, namespace, timestamp, message_id)
+
+
+def fixture_postbox_peer_id(namespace: int, raw_id: int) -> int:
+    value = ((raw_id >> 32) << 35) | ((namespace & 7) << 32) | (raw_id & 0xFFFFFFFF)
+    return value - (1 << 64) if value >= 1 << 63 else value
 
 
 class FixturePostboxConnection:
@@ -625,6 +1096,42 @@ def run_self_test(fixture_dir: str) -> None:
     if referenced_media_ids != expected["referenced_media_ids"]:
         raise AssertionError(f"referenced media decode failed: {message!r}")
 
+    media_message = read_message(fixture_message(embedded_media=[fixture_document_media()], referenced_media_ids=[]))
+    if not media_message:
+        raise AssertionError("embedded media fixture decode returned no message")
+    resource_ids = media_resource_ids(media_message["embedded_media"])
+    if resource_ids != ["telegram-cloud-document-2-987654321"]:
+        raise AssertionError(f"embedded media resource decode failed: {resource_ids!r}")
+    if media_title_for(media_message) != "fixture.mp4":
+        raise AssertionError(f"embedded media title decode failed: {media_title_for(media_message)!r}")
+    with tempfile.TemporaryDirectory() as tmp:
+        cached = Path(tmp) / "telegram-cloud-document-2-987654321"
+        cached.write_bytes(b"media")
+        cached_path, cached_size = cached_media_for(media_message, Path(tmp))
+        if cached_path != str(cached) or cached_size != 5:
+            raise AssertionError(f"cached media lookup failed: {(cached_path, cached_size)!r}")
+
+    photo_message = read_message(fixture_message(embedded_media=[fixture_photo_media()], referenced_media_ids=[]))
+    if not photo_message:
+        raise AssertionError("photo media fixture decode returned no message")
+    photo_resource_ids = media_resource_ids(photo_message["embedded_media"])
+    expected_photo_ids = [
+        "telegram-cloud-photo-size-4-123456789-s",
+        "telegram-cloud-photo-size-4-123456789-x",
+    ]
+    if photo_resource_ids != expected_photo_ids:
+        raise AssertionError(f"photo media resource decode failed: {photo_resource_ids!r}")
+    with tempfile.TemporaryDirectory() as tmp:
+        small = Path(tmp) / "telegram-cloud-photo-size-4-123456789-s"
+        large = Path(tmp) / "telegram-cloud-photo-size-4-123456789-x.jpg"
+        partial = Path(tmp) / "telegram-cloud-photo-size-4-123456789-x_partial"
+        small.write_bytes(b"1")
+        large.write_bytes(b"larger")
+        partial.write_bytes(b"not complete")
+        cached_path, cached_size = cached_media_for(photo_message, Path(tmp))
+        if cached_path != str(large) or cached_size != 6:
+            raise AssertionError(f"largest cached photo lookup failed: {(cached_path, cached_size)!r}")
+
     sample = [
         {"chat_id": "1", "_raw_chat_id": "1", "_ts": 10, "source_pk": 1},
         {"chat_id": "1", "_raw_chat_id": "1", "_ts": 20, "source_pk": 2},
@@ -653,6 +1160,91 @@ def run_self_test(fixture_dir: str) -> None:
     if [row["source_pk"] for row in filter_chat(multi_sample, "100")] != expected["raw_chat_filter_source_pks"]:
         raise AssertionError("raw chat filter failed")
 
+    if account_dir_record_id("account-10833815886710207757") != -7612928186999343859:
+        raise AssertionError("native account directory id decode failed")
+    if postbox_peer_to_telethon_id(fixture_postbox_peer_id(0, 777000)) != 777000:
+        raise AssertionError("user peer id conversion failed")
+    if postbox_peer_to_telethon_id(fixture_postbox_peer_id(1, 42)) != -42:
+        raise AssertionError("group peer id conversion failed")
+    if postbox_peer_to_telethon_id(fixture_postbox_peer_id(2, 42)) != -1_000_000_000_042:
+        raise AssertionError("channel peer id conversion failed")
+    if postbox_peer_to_telethon_id(fixture_postbox_peer_id(3, 42)) is not None:
+        raise AssertionError("secret chat peer id should not be remotely fetched")
+    remote_sample = [
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:1", "media_type": "photo", "media_path": ""},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:2", "media_type": "photo", "media_path": "cached"},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(3, 42)), "message_id": "0:3", "media_type": "photo", "media_path": ""},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "1:4", "media_type": "photo", "media_path": ""},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:5", "media_type": "", "media_path": ""},
+    ]
+    if [row["message_id"] for row in remote_media_candidates(remote_sample)] != ["0:1"]:
+        raise AssertionError(f"remote media candidate selection failed: {remote_sample!r}")
+    if remote_media_missing_count(remote_sample) != 1:
+        raise AssertionError(f"remote missing count failed: {remote_sample!r}")
+    import_module = importlib.import_module
+    try:
+        def missing_telethon(name: str, package: str | None = None) -> Any:
+            if name == "telethon":
+                raise ImportError("fixture missing telethon")
+            return import_module(name, package)
+
+        importlib.import_module = missing_telethon
+        result = download_remote_media(remote_sample, {}, "/tmp/telecrawl-unused-media")
+    finally:
+        importlib.import_module = import_module
+    if result != {"downloaded": 0, "missing": 1}:
+        raise AssertionError(f"remote media import failure should be best-effort: {result!r}")
+    duplicate_sample = [
+        {
+            "_account_id": "account-a",
+            "_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)),
+            "message_id": "0:7",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "media_type": "photo",
+            "media_title": "",
+            "media_path": "/tmp/media-a",
+            "media_size": 12,
+        },
+        {
+            "_account_id": "account-a",
+            "_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)),
+            "message_id": "0:7",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "media_type": "photo",
+            "media_title": "",
+            "media_path": "",
+            "media_size": 0,
+        },
+        {
+            "_account_id": "account-a",
+            "_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)),
+            "message_id": "0:7",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "media_type": "photo",
+            "media_title": "",
+            "media_path": "",
+            "media_size": 0,
+        },
+        {
+            "_account_id": "account-b",
+            "_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)),
+            "message_id": "0:7",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "media_type": "photo",
+            "media_title": "",
+            "media_path": "",
+            "media_size": 0,
+        },
+    ]
+    if share_duplicate_media(duplicate_sample) != 1:
+        raise AssertionError(f"duplicate media sharing count failed: {duplicate_sample!r}")
+    if duplicate_sample[1]["media_path"] != "/tmp/media-a" or duplicate_sample[1]["media_size"] != 12:
+        raise AssertionError(f"duplicate media sharing failed: {duplicate_sample!r}")
+    if duplicate_sample[2]["media_path"]:
+        raise AssertionError(f"duplicate media sharing ignored timestamp: {duplicate_sample!r}")
+    if duplicate_sample[3]["media_path"]:
+        raise AssertionError(f"duplicate media sharing crossed accounts: {duplicate_sample!r}")
+
     public_sources = [
         PostboxSource("stable/account-a", Path("unused-key-a"), Path("account-a.db")),
         PostboxSource("stable/account-b", Path("unused-key-b"), Path("account-b.db")),
@@ -669,7 +1261,9 @@ def run_self_test(fixture_dir: str) -> None:
     ]
     public_peers: dict[str, str] = {}
     public_messages: list[dict[str, Any]] = []
-    for source, conn in zip(public_sources, public_connections, strict=True):
+    if len(public_sources) != len(public_connections):
+        raise AssertionError("public fixture source/connection mismatch")
+    for source, conn in zip(public_sources, public_connections):
         peers, messages = read_source_records(source, conn, multi_account=True)
         public_peers.update(peers)
         public_messages.extend(messages)
@@ -700,6 +1294,8 @@ def main() -> None:
     parser.add_argument("--messages-limit", type=int, default=500)
     parser.add_argument("--chat", default="")
     parser.add_argument("--passcode", default="")
+    parser.add_argument("--fetch-media", action="store_true")
+    parser.add_argument("--media-output-dir", default="")
     args = parser.parse_args()
     if args.self_test:
         run_self_test(args.fixture_dir)
@@ -712,6 +1308,7 @@ def main() -> None:
 
     passcodes = read_passcodes(args.passcode)
     multi_account = len(sources) > 1
+    sources_by_account = {source.account_id: source for source in sources}
     all_peers: dict[str, str] = {}
     by_identity: dict[tuple[str, str, str], dict[str, Any]] = {}
     for source in sources:
@@ -724,8 +1321,13 @@ def main() -> None:
     if args.chat and not filtered:
         raise SystemExit(f"could not find chat in Postbox cache: {args.chat}")
     limited = apply_limits(filtered, args.dialogs_limit, args.messages_limit)
+    share_duplicate_media(limited)
+    remote_media = {"downloaded": 0, "missing": 0}
+    if args.fetch_media:
+        remote_media = download_remote_media(limited, sources_by_account, args.media_output_dir)
+        share_duplicate_media(limited)
     source_path = str(Path(args.source).expanduser()) if args.source else str(default_group_path())
-    json.dump(build_result(source_path, all_peers, limited, started), sys.stdout, separators=(",", ":"))
+    json.dump(build_result(source_path, all_peers, limited, started, remote_media), sys.stdout, separators=(",", ":"))
 
 
 if __name__ == "__main__":

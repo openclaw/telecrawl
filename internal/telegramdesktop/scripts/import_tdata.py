@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from telethon import functions, utils
 from opentele2.api import UseCurrentSession
@@ -116,6 +117,20 @@ def title_text(value):
     return str(value)
 
 
+async def download_message_media(client, message, output_dir, chat_id):
+    if output_dir is None or not getattr(message, "media", None):
+        return "", 0
+    message_dir = output_dir / hashlib.sha256(f"{chat_id}:{message.id}".encode()).hexdigest()
+    message_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        path = await client.download_media(message, file=str(message_dir))
+    except Exception:
+        return "", 0
+    if path and Path(path).is_file():
+        return str(path), Path(path).stat().st_size
+    return "", 0
+
+
 async def load_folders(client):
     folders = []
     memberships = {}
@@ -225,6 +240,8 @@ async def main():
     parser.add_argument("--dialogs-limit", type=int, default=200)
     parser.add_argument("--messages-limit", type=int, default=500)
     parser.add_argument("--chat", default="")
+    parser.add_argument("--fetch-media", action="store_true")
+    parser.add_argument("--media-output-dir", default="")
     args = parser.parse_args()
 
     started = datetime.now(timezone.utc)
@@ -249,6 +266,8 @@ async def main():
     out_messages = []
     out_topics = []
     out_folders = []
+    remote_media = {"downloaded": 0, "missing": 0}
+    media_output_dir = Path(args.media_output_dir).expanduser() if args.fetch_media and args.media_output_dir else None
     folder_memberships = {}
     if not args.chat:
         out_folders, folder_memberships = await load_folders(client)
@@ -288,6 +307,16 @@ async def main():
             elif type(getattr(msg, "action", None)).__name__ == "MessageActionTopicCreate":
                 topic_id = str(msg.id)
             replies = getattr(msg, "replies", None)
+            msg_media_type = media_type(msg)
+            msg_media_path = ""
+            msg_media_size = media_size(msg)
+            if args.fetch_media and msg_media_type:
+                msg_media_path, downloaded_size = await download_message_media(client, msg, media_output_dir, chat_id)
+                if msg_media_path:
+                    msg_media_size = downloaded_size
+                    remote_media["downloaded"] += 1
+                else:
+                    remote_media["missing"] += 1
             out_messages.append(
                 {
                     "source_pk": stable_pk(chat_id, msg.id),
@@ -305,9 +334,10 @@ async def main():
                     "from_me": bool(getattr(msg, "out", False)),
                     "text": text,
                     "message_type": type(msg).__name__,
-                    "media_type": media_type(msg),
+                    "media_type": msg_media_type,
                     "media_title": media_title(msg),
-                    "media_size": media_size(msg),
+                    "media_path": msg_media_path,
+                    "media_size": msg_media_size,
                     "views": int(getattr(msg, "views", 0) or 0),
                     "forwards": int(getattr(msg, "forwards", 0) or 0),
                     "replies_count": int(getattr(replies, "replies", 0) or 0),
@@ -342,6 +372,7 @@ async def main():
                 "source_path": args.tdata,
                 "started_at": iso(started),
                 "finished_at": iso(datetime.now(timezone.utc)),
+                "remote_media": remote_media,
                 "chats": out_chats,
                 "folders": out_folders,
                 "folder_chats": out_folder_chats,

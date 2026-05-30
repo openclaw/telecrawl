@@ -168,7 +168,7 @@ func depsInstallPackages() []string {
 }
 
 func postboxDepsInstallPackages() []string {
-	return []string{"pycryptodomex", "sqlcipher3"}
+	return []string{"pycryptodomex", "sqlcipher3", "telethon"}
 }
 
 func (r *runtime) withStore(fn func(*store.Store) error) error {
@@ -213,6 +213,7 @@ func (r *runtime) runImport(args []string) error {
 	dialogsLimit := fs.Int("dialogs-limit", 200, "")
 	messagesLimit := fs.Int("messages-limit", 500, "")
 	chat := fs.String("chat", "", "")
+	fetchMedia := fs.Bool("fetch-media", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -226,6 +227,7 @@ func (r *runtime) runImport(args []string) error {
 			DialogsLimit:  *dialogsLimit,
 			MessagesLimit: *messagesLimit,
 			ChatID:        *chat,
+			FetchMedia:    *fetchMedia,
 		}, st.Path())
 		if err != nil {
 			return err
@@ -238,6 +240,9 @@ func (r *runtime) runImport(args []string) error {
 }
 
 func storeImportResult(ctx context.Context, st *store.Store, result telegramdesktop.ImportResult, chatFilter string) error {
+	if err := preserveExistingMediaRefs(ctx, st, result.Stats.SourcePath, result.Messages); err != nil {
+		return err
+	}
 	if strings.TrimSpace(chatFilter) == "" {
 		return st.ReplaceAll(ctx, result.Stats, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages)
 	}
@@ -249,6 +254,51 @@ func storeImportResult(ctx context.Context, st *store.Store, result telegramdesk
 		if err := st.UpsertChat(ctx, partial.Stats, chat.JID, partial.Chats, partial.Folders, partial.FolderChats, partial.Topics, partial.Messages); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func preserveExistingMediaRefs(ctx context.Context, st *store.Store, sourcePath string, messages []store.Message) error {
+	sourcePath = strings.TrimSpace(sourcePath)
+	if sourcePath == "" {
+		return nil
+	}
+	status, err := st.Status(ctx)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(status.LastSource) != sourcePath {
+		return nil
+	}
+	existing, err := st.Messages(ctx, store.MessageFilter{HasMedia: true, Limit: int(^uint(0) >> 1)})
+	if err != nil {
+		return err
+	}
+	type mediaRef struct {
+		path string
+		size int64
+	}
+	refs := make(map[int64]mediaRef)
+	for _, msg := range existing {
+		path := strings.TrimSpace(msg.MediaPath)
+		if path == "" {
+			continue
+		}
+		refs[msg.SourcePK] = mediaRef{path: path, size: msg.MediaSize}
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	for i := range messages {
+		if strings.TrimSpace(messages[i].MediaPath) != "" || messages[i].MediaType == "" {
+			continue
+		}
+		ref, ok := refs[messages[i].SourcePK]
+		if !ok {
+			continue
+		}
+		messages[i].MediaPath = ref.path
+		messages[i].MediaSize = ref.size
 	}
 	return nil
 }
@@ -597,9 +647,14 @@ func (r *runtime) print(v any) error {
 		}
 		return nil
 	case store.ImportStats:
-		if _, err := fmt.Fprintf(r.stdout, "source_path: %s\ndb_path: %s\nchats: %d\nmessages: %d\nmedia_messages: %d\nstarted_at: %s\nfinished_at: %s\n",
-			value.SourcePath, value.DBPath, value.Chats, value.Messages, value.MediaMessages, value.StartedAt.Format(time.RFC3339), value.FinishedAt.Format(time.RFC3339)); err != nil {
+		if _, err := fmt.Fprintf(r.stdout, "source_path: %s\ndb_path: %s\nchats: %d\nmessages: %d\nmedia_messages: %d\nmedia_files: %d\nmedia_bytes: %d\nstarted_at: %s\nfinished_at: %s\n",
+			value.SourcePath, value.DBPath, value.Chats, value.Messages, value.MediaMessages, value.MediaFiles, value.MediaBytes, value.StartedAt.Format(time.RFC3339), value.FinishedAt.Format(time.RFC3339)); err != nil {
 			return err
+		}
+		if value.RemoteMediaDownloads != 0 || value.RemoteMediaMissing != 0 {
+			if _, err := fmt.Fprintf(r.stdout, "remote_media_downloads: %d\nremote_media_missing: %d\n", value.RemoteMediaDownloads, value.RemoteMediaMissing); err != nil {
+				return err
+			}
 		}
 		return nil
 	default:
@@ -618,7 +673,7 @@ func printUsage(w io.Writer) {
 usage:
   telecrawl [--json] doctor [--path PATH]
   telecrawl [--json] metadata
-  telecrawl [--json] import [--path PATH] [--chat ID] [--dialogs-limit N] [--messages-limit N]
+  telecrawl [--json] import [--path PATH] [--chat ID] [--dialogs-limit N] [--messages-limit N] [--fetch-media]
   telecrawl [--json] status
   telecrawl [--json] folders
   telecrawl [--json] chats [--limit N] [--unread] [--folder ID]
@@ -631,6 +686,7 @@ usage:
 
 notes:
   import auto-detects Telegram Desktop tdata or native macOS Postbox data
+  import archives local cached Postbox media by default; --fetch-media also tries Telegram cloud media
   backup writes encrypted age shards to a git repo
 `)
 }

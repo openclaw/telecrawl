@@ -71,6 +71,13 @@ Use `0` for no limit:
 telecrawl import --dialogs-limit 0 --messages-limit 0
 ```
 
+Add `--fetch-media` when you also want Telegram cloud media that is not cached
+locally:
+
+```bash
+telecrawl import --dialogs-limit 0 --messages-limit 0 --fetch-media
+```
+
 When no `--source` is provided on macOS, `telecrawl` checks Telegram Desktop
 `tdata` first, then the native Telegram for macOS group container. No backend
 flag is needed. To import a copied archive directly:
@@ -81,7 +88,9 @@ telecrawl import --path "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.
 
 Native macOS imports include every local `account-*` database they find; if more
 than one account is present, stored chat and sender IDs are account-scoped to
-avoid collisions.
+avoid collisions. They archive cached media by default. `--fetch-media` also uses
+the existing native Telegram session to fetch missing cloud media when account
+auth data is present; this does not launch Telegram or start a login/2FA flow.
 
 Useful reads:
 
@@ -120,6 +129,8 @@ Defaults:
 - native macOS Postbox source:
   `~/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram`
 - archive DB: `~/.telecrawl/telecrawl.db`
+- archived media copied from local Telegram caches, plus Telegram cloud media
+  when `--fetch-media` is used: `~/.telecrawl/media/`
 - Python bridge venv: `~/.telecrawl/venv`
 - Telethon sessions: `~/.telecrawl/sessions/`
 - backup config: `~/.telecrawl/backup.json`
@@ -205,7 +216,8 @@ Git can still see cleartext metadata:
 - backup cadence and which encrypted shards changed
 
 Git cannot read message text, chat names, sender names, or media metadata without
-an age identity.
+an age identity. Binary media files archived in `~/.telecrawl/media/` are local
+only and are not included in backup shards.
 
 Keep `~/.telecrawl/age.key` private. If you lose it and no other recipient can
 decrypt the backup, the encrypted backup cannot be restored.
