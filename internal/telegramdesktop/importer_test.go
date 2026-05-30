@@ -46,6 +46,14 @@ func TestResolveImportSourceClassifiesExplicitPostboxPath(t *testing.T) {
 	}
 }
 
+func TestPipInstallHintQuotesVersionedRequirements(t *testing.T) {
+	got := pipInstallHint("opentele2 telethon>=1.43.2")
+	want := "opentele2 'telethon>=1.43.2'"
+	if got != want {
+		t.Fatalf("hint = %q, want %q", got, want)
+	}
+}
+
 func TestPostboxParserSanitizedFixture(t *testing.T) {
 	// Exercises the embedded Postbox decoder against public sanitized format fixtures.
 	python, err := resolvePython("")
@@ -116,6 +124,33 @@ func TestCopyImportedMediaArchivesByContentHash(t *testing.T) {
 	}
 }
 
+func TestCopyImportedMediaKeepsExistingArchiveRef(t *testing.T) {
+	t.Parallel()
+	archiveDir := filepath.Join(t.TempDir(), "media")
+	archivedPath := filepath.Join(archiveDir, "ab", "already-archived")
+	if err := os.MkdirAll(filepath.Dir(archivedPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archivedPath, []byte("already archived"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	messages := []store.Message{{SourcePK: 1, MediaPath: archivedPath}}
+	var stats store.ImportStats
+
+	if err := copyImportedMedia(messages, archiveDir, &stats); err != nil {
+		t.Fatal(err)
+	}
+	if messages[0].MediaPath != archivedPath {
+		t.Fatalf("media path = %q, want existing archive path %q", messages[0].MediaPath, archivedPath)
+	}
+	if messages[0].MediaSize != int64(len("already archived")) {
+		t.Fatalf("media size = %d, want %d", messages[0].MediaSize, len("already archived"))
+	}
+	if stats.MediaFiles != 1 || stats.MediaBytes != int64(len("already archived")) {
+		t.Fatalf("media stats = %+v", stats)
+	}
+}
+
 func TestCopyImportedMediaSkipsMissingSourceCache(t *testing.T) {
 	t.Parallel()
 	messages := []store.Message{
@@ -155,6 +190,34 @@ func TestImportPassesFetchMediaToTDataImporter(t *testing.T) {
 	idx := indexArg(args, "--media-output-dir")
 	if idx < 0 || idx+1 >= len(args) || strings.TrimSpace(args[idx+1]) == "" {
 		t.Fatalf("args missing --media-output-dir value: %v", args)
+	}
+}
+
+func TestImportPassesExistingMediaRefsToPostboxImporter(t *testing.T) {
+	t.Parallel()
+	python, argvPath := fakePythonImporter(t)
+	source, _, _ := makePostboxFixture(t)
+
+	_, err := Import(context.Background(), ImportOptions{
+		Path:                    source,
+		Python:                  python,
+		FetchMedia:              true,
+		ExistingMediaSourcePath: source,
+		ExistingMediaRefs: []ExistingMediaRef{{
+			SourcePK:  42,
+			MediaType: "photo",
+			MediaPath: "/tmp/already-archived",
+			MediaSize: 12,
+		}},
+	}, filepath.Join(t.TempDir(), "telecrawl.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	args := readImporterArgs(t, argvPath)
+	idx := indexArg(args, "--existing-media-refs")
+	if idx < 0 || idx+1 >= len(args) || strings.TrimSpace(args[idx+1]) == "" {
+		t.Fatalf("args missing --existing-media-refs value: %v", args)
 	}
 }
 

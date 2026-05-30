@@ -368,6 +368,20 @@ def native_session_for_source(source: PostboxSource) -> NativeSession | None:
 
 
 def postbox_peer_to_telethon_id(peer_id: int) -> int | None:
+    parts = postbox_peer_parts(peer_id)
+    if parts is None:
+        return None
+    namespace, raw_id = parts
+    if namespace == 0:
+        return raw_id
+    if namespace == 1:
+        return -raw_id
+    if namespace == 2:
+        return -1_000_000_000_000 - raw_id
+    return None
+
+
+def postbox_peer_parts(peer_id: int) -> tuple[int, int] | None:
     data = peer_id & ((1 << 64) - 1)
     legacy_namespace_bits = (data >> 32) & 0xFFFFFFFF
     id_low_bits = data & 0xFFFFFFFF
@@ -381,13 +395,7 @@ def postbox_peer_to_telethon_id(peer_id: int) -> int | None:
         raw_id = id_high_bits | id_low_bits
         if raw_id >= 1 << 63:
             raw_id -= 1 << 64
-    if namespace == 0:
-        return raw_id
-    if namespace == 1:
-        return -raw_id
-    if namespace == 2:
-        return -1_000_000_000_000 - raw_id
-    return None
+    return namespace, raw_id
 
 
 def peer_display(peer: Any) -> str:
@@ -404,22 +412,38 @@ def peer_display(peer: Any) -> str:
     return ""
 
 
-def load_peer_map(conn: Any) -> dict[int, str]:
-    peers: dict[int, str] = {}
+def peer_access_hash(peer: Any) -> int:
+    if not isinstance(peer, dict):
+        return 0
+    try:
+        return int(peer.get("ah") or 0)
+    except Exception:
+        return 0
+
+
+def load_peer_records(conn: Any) -> dict[int, dict[str, Any]]:
+    peers: dict[int, dict[str, Any]] = {}
     for key, value in conn.execute("SELECT key, value FROM t2"):
         if not isinstance(key, int) or not isinstance(value, bytes):
             continue
         try:
-            display = peer_display(PostboxDecoder(value).decode_root_object())
+            peer = PostboxDecoder(value).decode_root_object()
         except Exception:
             continue
-        if display:
-            peers[key] = display
+        display = peer_display(peer)
+        access_hash = peer_access_hash(peer)
+        if display or access_hash:
+            peers[key] = {"display": display, "access_hash": access_hash}
     return peers
 
 
+def load_peer_map(conn: Any) -> dict[int, str]:
+    return {peer_id: str(peer.get("display") or "") for peer_id, peer in load_peer_records(conn).items()}
+
+
 def read_source_records(source: PostboxSource, conn: Any, multi_account: bool) -> tuple[dict[str, str], list[dict[str, Any]]]:
-    raw_peers = load_peer_map(conn)
+    raw_peer_records = load_peer_records(conn)
+    raw_peers = {peer_id: str(peer.get("display") or "") for peer_id, peer in raw_peer_records.items()}
     peers = {
         peer_store_id(source.account_id, peer_id, multi_account): display
         for peer_id, display in raw_peers.items()
@@ -453,6 +477,7 @@ def read_source_records(source: PostboxSource, conn: Any, multi_account: bool) -
             sender_name = ""
         messages.append({
             "_account_id": source.account_id,
+            "_access_hash": str((raw_peer_records.get(peer_id) or {}).get("access_hash") or 0),
             "_ts": timestamp,
             "_raw_chat_id": str(peer_id),
             "source_pk": source_pk(source.account_id, peer_id, namespace, message_id, multi_account),
@@ -469,6 +494,7 @@ def read_source_records(source: PostboxSource, conn: Any, multi_account: bool) -
             "media_title": media_title_for(msg),
             "media_path": media_path,
             "media_size": media_size,
+            "embedded_media": msg.get("embedded_media") or [],
         })
     return peers, messages
 
@@ -744,6 +770,13 @@ def duplicate_media_key(msg: dict[str, Any]) -> tuple[str, int, int, str, str, s
     )
 
 
+def message_resource_ids(msg: dict[str, Any]) -> list[str]:
+    ids: list[str] = []
+    for item in msg.get("embedded_media") or []:
+        ids.extend(media_resource_ids(item))
+    return list(dict.fromkeys(ids))
+
+
 def share_duplicate_media(messages: list[dict[str, Any]]) -> int:
     known: dict[tuple[str, int, int, str, str, str], tuple[str, int]] = {}
     for msg in messages:
@@ -765,6 +798,30 @@ def share_duplicate_media(messages: list[dict[str, Any]]) -> int:
     return filled
 
 
+def share_resource_media(messages: list[dict[str, Any]]) -> int:
+    known: dict[str, tuple[str, int]] = {}
+    for msg in messages:
+        media_path = str(msg.get("media_path") or "")
+        if not media_path:
+            continue
+        media_size = int(msg.get("media_size") or 0)
+        for resource_id in message_resource_ids(msg):
+            previous = known.get(resource_id)
+            if previous is None or media_size > previous[1]:
+                known[resource_id] = (media_path, media_size)
+
+    filled = 0
+    for msg in messages:
+        if msg.get("media_path") or not msg.get("media_type"):
+            continue
+        matches = [known[resource_id] for resource_id in message_resource_ids(msg) if resource_id in known]
+        if not matches:
+            continue
+        msg["media_path"], msg["media_size"] = max(matches, key=lambda item: item[1])
+        filled += 1
+    return filled
+
+
 def remote_media_candidates(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     candidates = []
     for msg in messages:
@@ -778,6 +835,54 @@ def remote_media_candidates(messages: list[dict[str, Any]]) -> list[dict[str, An
 
 def remote_media_missing_count(messages: list[dict[str, Any]]) -> int:
     return len({key for msg in remote_media_candidates(messages) if (key := duplicate_media_key(msg)) is not None})
+
+
+def load_existing_media_refs(path: str) -> dict[str, dict[str, Any]]:
+    if not path:
+        return {}
+    data = json.loads(Path(path).read_text())
+    refs: dict[str, dict[str, Any]] = {}
+    for item in data:
+        source_pk = str(item.get("source_pk") or "")
+        media_path = str(item.get("media_path") or "")
+        if source_pk and media_path:
+            refs[source_pk] = item
+    return refs
+
+
+def apply_existing_media_refs(messages: list[dict[str, Any]], refs: dict[str, dict[str, Any]]) -> int:
+    if not refs:
+        return 0
+    restored = 0
+    for msg in messages:
+        if msg.get("media_path"):
+            continue
+        ref = refs.get(str(msg.get("source_pk") or ""))
+        if not ref:
+            continue
+        media_path = str(ref.get("media_path") or "")
+        if not media_path:
+            continue
+        msg["media_path"] = media_path
+        msg["media_size"] = int(ref.get("media_size") or 0)
+        if not msg.get("media_type"):
+            msg["media_type"] = str(ref.get("media_type") or "")
+        if not msg.get("media_title"):
+            msg["media_title"] = str(ref.get("media_title") or "")
+        restored += 1
+    return restored
+
+
+def clear_unarchived_placeholder_media(messages: list[dict[str, Any]]) -> int:
+    cleared = 0
+    for msg in messages:
+        if msg.get("media_path") or msg.get("media_type") not in {"web_page", "media"}:
+            continue
+        msg["media_type"] = ""
+        msg["media_title"] = ""
+        msg["media_size"] = 0
+        cleared += 1
+    return cleared
 
 
 async def wait_remote(awaitable: Any, seconds: int) -> Any:
@@ -798,13 +903,82 @@ def empty_remote_media_stats(missing: int = 0) -> dict[str, int]:
 
 def add_remote_media_stats(left: dict[str, int], right: dict[str, int]) -> None:
     for key, value in right.items():
-        if key == "missing":
+        if key == "missing" or key.startswith("_"):
             continue
         left[key] = int(left.get(key, 0)) + int(value or 0)
 
 
 def remote_error_key(exc: Exception) -> str:
     return "timeouts" if isinstance(exc, TimeoutError) else "errors"
+
+
+def input_peer_for_message(msg: dict[str, Any], telethon: Any) -> Any:
+    try:
+        peer_id = int(msg.get("_raw_chat_id") or 0)
+        access_hash = int(msg.get("_access_hash") or 0)
+    except Exception:
+        return None
+    parts = postbox_peer_parts(peer_id)
+    if parts is None:
+        return None
+    namespace, raw_id = parts
+    if namespace == 0 and access_hash:
+        return telethon.types.InputPeerUser(raw_id, access_hash)
+    if namespace == 1:
+        return telethon.types.InputPeerChat(raw_id)
+    if namespace == 2 and access_hash:
+        return telethon.types.InputPeerChannel(raw_id, access_hash)
+    return None
+
+
+async def get_remote_message(client: Any, msg: dict[str, Any], telethon: Any) -> Any:
+    message_id = cloud_message_id(str(msg.get("message_id") or ""))
+    if message_id is None:
+        return None
+    peers: list[Any] = []
+    try:
+        peer_id = postbox_peer_to_telethon_id(int(msg.get("_raw_chat_id") or 0))
+    except Exception:
+        peer_id = None
+    if peer_id is not None:
+        peers.append(peer_id)
+    input_peer = input_peer_for_message(msg, telethon)
+    if input_peer is not None:
+        peers.append(input_peer)
+    first_error: Exception | None = None
+    for peer in peers:
+        try:
+            return await wait_remote(client.get_messages(peer, ids=message_id), REMOTE_MESSAGE_TIMEOUT_SECONDS)
+        except Exception as exc:
+            if first_error is None:
+                first_error = exc
+            continue
+    if first_error is not None:
+        raise first_error
+    return None
+
+
+async def download_remote_message(client: Any, telegram_message: Any, message_dir: Path) -> tuple[str, int]:
+    targets = [telegram_message]
+    media = getattr(telegram_message, "media", None)
+    if media is not None:
+        targets.append(media)
+        webpage = getattr(media, "webpage", None)
+        if webpage is not None:
+            targets.append(webpage)
+            for attr in ("photo", "document"):
+                nested = getattr(webpage, attr, None)
+                if nested is not None:
+                    targets.append(nested)
+    seen: set[int] = set()
+    for target in targets:
+        if target is None or id(target) in seen:
+            continue
+        seen.add(id(target))
+        path = await wait_remote(client.download_media(target, file=str(message_dir)), REMOTE_DOWNLOAD_TIMEOUT_SECONDS)
+        if path and Path(path).is_file() and Path(path).stat().st_size > 0:
+            return str(path), Path(path).stat().st_size
+    return "", 0
 
 
 async def download_remote_media_for_account(
@@ -830,20 +1004,15 @@ async def download_remote_media_for_account(
     try:
         await wait_remote(client.connect(), REMOTE_CONNECT_TIMEOUT_SECONDS)
         if not await wait_remote(client.is_user_authorized(), REMOTE_AUTH_TIMEOUT_SECONDS):
-            stats["unavailable"] += len(messages)
+            stats["_auth_unavailable"] = len(messages)
             return stats
         for msg in messages:
-            peer_id = postbox_peer_to_telethon_id(int(msg.get("_raw_chat_id") or 0))
-            message_id = cloud_message_id(str(msg.get("message_id") or ""))
-            if peer_id is None or message_id is None:
+            if cloud_message_id(str(msg.get("message_id") or "")) is None:
                 stats["unavailable"] += 1
                 continue
             stats["attempted"] += 1
             try:
-                telegram_message = await wait_remote(
-                    client.get_messages(peer_id, ids=message_id),
-                    REMOTE_MESSAGE_TIMEOUT_SECONDS,
-                )
+                telegram_message = await get_remote_message(client, msg, telethon)
             except Exception as exc:
                 if dialogs_loaded:
                     stats[remote_error_key(exc)] += 1
@@ -851,14 +1020,11 @@ async def download_remote_media_for_account(
                 try:
                     await wait_remote(client.get_dialogs(limit=None), REMOTE_DIALOGS_TIMEOUT_SECONDS)
                     dialogs_loaded = True
-                    telegram_message = await wait_remote(
-                        client.get_messages(peer_id, ids=message_id),
-                        REMOTE_MESSAGE_TIMEOUT_SECONDS,
-                    )
+                    telegram_message = await get_remote_message(client, msg, telethon)
                 except Exception as fallback_exc:
                     stats[remote_error_key(fallback_exc)] += 1
                     continue
-            if not telegram_message or not getattr(telegram_message, "media", None):
+            if not telegram_message:
                 stats["unavailable"] += 1
                 continue
             message_dir = output_dir / hashlib.sha256(
@@ -866,16 +1032,13 @@ async def download_remote_media_for_account(
             ).hexdigest()
             message_dir.mkdir(parents=True, exist_ok=True)
             try:
-                path = await wait_remote(
-                    client.download_media(telegram_message, file=str(message_dir)),
-                    REMOTE_DOWNLOAD_TIMEOUT_SECONDS,
-                )
+                path, size = await download_remote_message(client, telegram_message, message_dir)
             except Exception as exc:
                 stats[remote_error_key(exc)] += 1
                 continue
-            if path and Path(path).is_file():
+            if path:
                 msg["media_path"] = str(path)
-                msg["media_size"] = Path(path).stat().st_size
+                msg["media_size"] = size
                 stats["downloaded"] += 1
             else:
                 stats["unavailable"] += 1
@@ -894,6 +1057,7 @@ async def download_remote_media_async(
     telethon: Any,
 ) -> dict[str, int]:
     share_duplicate_media(messages)
+    share_resource_media(messages)
     candidates = remote_media_candidates(messages)
     if not candidates:
         return empty_remote_media_stats()
@@ -904,24 +1068,32 @@ async def download_remote_media_async(
         if (native_session := native_session_for_source(source)) is not None
     }
     if not sessions:
+        clear_unarchived_placeholder_media(messages)
         stats["unavailable"] = len(candidates)
+        stats["missing"] = remote_media_missing_count(messages)
         return stats
 
     by_account: dict[str, list[dict[str, Any]]] = {}
     for msg in candidates:
         by_account.setdefault(str(msg.get("_account_id") or ""), []).append(msg)
     for account_id, rows in by_account.items():
-        native_session = sessions.get(account_id)
-        if native_session is None:
+        preferred = [sessions[account_id]] if account_id in sessions else []
+        fallbacks = [session for session_id, session in sessions.items() if session_id != account_id]
+        for native_session in preferred + fallbacks:
+            try:
+                result = await download_remote_media_for_account(native_session, rows, output_dir, telethon)
+            except Exception:
+                stats["errors"] += len(rows)
+                break
+            if result.get("_auth_unavailable"):
+                continue
+            add_remote_media_stats(stats, result)
+            break
+        else:
             stats["unavailable"] += len(rows)
-            continue
-        try:
-            result = await download_remote_media_for_account(native_session, rows, output_dir, telethon)
-        except Exception:
-            stats["errors"] += len(rows)
-            continue
-        add_remote_media_stats(stats, result)
         share_duplicate_media(messages)
+        share_resource_media(messages)
+    clear_unarchived_placeholder_media(messages)
     stats["missing"] = remote_media_missing_count(messages)
     return stats
 
@@ -937,14 +1109,17 @@ def download_remote_media(
     try:
         telethon = importlib.import_module("telethon")
     except ImportError:
+        clear_unarchived_placeholder_media(messages)
         stats = empty_remote_media_stats(missing)
-        stats["errors"] = missing
+        stats["missing"] = remote_media_missing_count(messages)
+        stats["errors"] = stats["missing"]
         return stats
     output_dir = Path(media_output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
         return asyncio.run(download_remote_media_async(messages, sources_by_account, output_dir, telethon))
     except Exception:
+        clear_unarchived_placeholder_media(messages)
         stats = empty_remote_media_stats(remote_media_missing_count(messages))
         stats["errors"] = stats["missing"]
         return stats
@@ -957,11 +1132,14 @@ def build_result(
     started: dt.datetime,
     remote_media: dict[str, int] | None = None,
 ) -> dict[str, Any]:
+    clear_unarchived_placeholder_media(messages)
     chats: dict[str, dict[str, Any]] = {}
     for msg in messages:
         msg.pop("_ts", None)
         msg.pop("_raw_chat_id", None)
         msg.pop("_account_id", None)
+        msg.pop("_access_hash", None)
+        msg.pop("embedded_media", None)
         chat_id = msg["chat_id"]
         chat = chats.setdefault(chat_id, {
             "id": chat_id,
@@ -1242,6 +1420,28 @@ def run_self_test(fixture_dir: str) -> None:
         raise AssertionError(f"remote media candidate selection failed: {remote_sample!r}")
     if remote_media_missing_count(remote_sample) != 1:
         raise AssertionError(f"remote missing count failed: {remote_sample!r}")
+    existing_ref_sample = [
+        {"source_pk": 10, "message_id": "0:10", "media_type": "photo", "media_path": ""},
+        {"source_pk": 11, "message_id": "0:11", "media_type": "", "media_path": ""},
+    ]
+    restored = apply_existing_media_refs(existing_ref_sample, {
+        "10": {"source_pk": 10, "media_path": "/tmp/already-archived", "media_size": 44},
+        "11": {"source_pk": 11, "media_type": "gif", "media_title": "loop", "media_path": "/tmp/loop", "media_size": 55},
+    })
+    if restored != 2 or remote_media_candidates(existing_ref_sample):
+        raise AssertionError(f"existing media refs should suppress remote fetch: {existing_ref_sample!r}")
+    if existing_ref_sample[1]["media_type"] != "gif" or existing_ref_sample[1]["media_title"] != "loop":
+        raise AssertionError(f"existing media refs should restore durable metadata: {existing_ref_sample!r}")
+    placeholder_sample = [
+        {"media_type": "web_page", "media_title": "preview", "media_path": "", "media_size": 10},
+        {"media_type": "media", "media_title": "generic", "media_path": "", "media_size": 10},
+        {"media_type": "web_page", "media_title": "cached", "media_path": "/tmp/cached", "media_size": 10},
+        {"media_type": "photo", "media_title": "", "media_path": "", "media_size": 0},
+    ]
+    if clear_unarchived_placeholder_media(placeholder_sample) != 2:
+        raise AssertionError(f"placeholder clear count failed: {placeholder_sample!r}")
+    if [row["media_type"] for row in placeholder_sample] != ["", "", "web_page", "photo"]:
+        raise AssertionError(f"placeholder media clear failed: {placeholder_sample!r}")
     import_module = importlib.import_module
     try:
         def missing_telethon(name: str, package: str | None = None) -> Any:
@@ -1324,6 +1524,28 @@ def run_self_test(fixture_dir: str) -> None:
     if duplicate_sample[3]["media_path"]:
         raise AssertionError(f"duplicate media sharing crossed accounts: {duplicate_sample!r}")
 
+    resource_photo = PostboxDecoder(fixture_photo_media(photo_id=99)).decode_root_object()
+    resource_sample = [
+        {
+            "_account_id": "account-a",
+            "media_type": "photo",
+            "media_path": "/tmp/resource-a",
+            "media_size": 12,
+            "embedded_media": [resource_photo],
+        },
+        {
+            "_account_id": "account-b",
+            "media_type": "photo",
+            "media_path": "",
+            "media_size": 0,
+            "embedded_media": [resource_photo],
+        },
+    ]
+    if share_resource_media(resource_sample) != 1:
+        raise AssertionError(f"resource media sharing count failed: {resource_sample!r}")
+    if resource_sample[1]["media_path"] != "/tmp/resource-a" or resource_sample[1]["media_size"] != 12:
+        raise AssertionError(f"resource media sharing failed: {resource_sample!r}")
+
     public_sources = [
         PostboxSource("stable/account-a", Path("unused-key-a"), Path("account-a.db")),
         PostboxSource("stable/account-b", Path("unused-key-b"), Path("account-b.db")),
@@ -1356,6 +1578,8 @@ def run_self_test(fixture_dir: str) -> None:
     public_result = build_result("fixture-postbox", public_peers, public_filtered, dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc))
     if len(public_result["chats"]) != 2 or len(public_result["messages"]) != 2:
         raise AssertionError(f"public import result shape failed: {public_result!r}")
+    if any("embedded_media" in msg for msg in public_result["messages"]):
+        raise AssertionError(f"public import leaked internal media records: {public_result!r}")
     if {msg["text"] for msg in public_result["messages"]} != {"public account a", "public account b"}:
         raise AssertionError(f"public import message text mismatch: {public_result!r}")
     if sum(1 for msg in public_result["messages"] if msg["media_type"]) != 2:
@@ -1375,6 +1599,7 @@ def main() -> None:
     parser.add_argument("--passcode", default="")
     parser.add_argument("--fetch-media", action="store_true")
     parser.add_argument("--media-output-dir", default="")
+    parser.add_argument("--existing-media-refs", default="")
     args = parser.parse_args()
     if args.self_test:
         run_self_test(args.fixture_dir)
@@ -1401,10 +1626,15 @@ def main() -> None:
         raise SystemExit(f"could not find chat in Postbox cache: {args.chat}")
     limited = apply_limits(filtered, args.dialogs_limit, args.messages_limit)
     share_duplicate_media(limited)
+    share_resource_media(limited)
+    if apply_existing_media_refs(limited, load_existing_media_refs(args.existing_media_refs)):
+        share_duplicate_media(limited)
+        share_resource_media(limited)
     remote_media = {"downloaded": 0, "missing": 0}
     if args.fetch_media:
         remote_media = download_remote_media(limited, sources_by_account, args.media_output_dir)
         share_duplicate_media(limited)
+        share_resource_media(limited)
     source_path = str(Path(args.source).expanduser()) if args.source else str(default_group_path())
     json.dump(build_result(source_path, all_peers, limited, started, remote_media), sys.stdout, separators=(",", ":"))
 

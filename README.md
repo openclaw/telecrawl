@@ -49,8 +49,10 @@ telecrawl deps install
 
 This creates `~/.telecrawl/venv` and installs the bridge packages for Telegram
 Desktop `tdata`. It also attempts the optional native macOS Postbox SQLCipher
-binding when the host has the required native SQLCipher support. The Docker image
-packages both the Python bridge and native SQLCipher dependencies.
+binding when the host has the required native SQLCipher support. Native Postbox
+cloud-media fetches require Telethon `1.43.2` or newer for current Telegram TL
+types. The Docker image packages both the Python bridge and native SQLCipher
+dependencies.
 
 ## Import
 
@@ -81,6 +83,15 @@ telecrawl import --dialogs-limit 0 --messages-limit 0 --fetch-media
 Remote media fetches are bounded best-effort operations. Import stats report how
 many remote media candidates were attempted, downloaded, still missing,
 unavailable, timed out, or errored.
+
+Repeat imports reuse existing archived media for the same source before remote
+fetch is attempted, so `--fetch-media` only tries media that is not already in
+the local archive.
+
+Native Postbox can tag link previews, polls, geo/live-geo, service messages, or
+deleted messages as broad media candidates. `telecrawl` tries those during
+`--fetch-media`, but only keeps them as media rows when Telegram returns a
+downloadable file.
 
 When no `--source` is provided on macOS, `telecrawl` checks Telegram Desktop
 `tdata` first, then the native Telegram for macOS group container. No backend

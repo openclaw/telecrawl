@@ -18,7 +18,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && python -m venv /opt/telecrawl-venv \
     && /opt/telecrawl-venv/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/telecrawl-venv/bin/pip install --no-cache-dir opentele2 telethon pycryptodomex sqlcipher3
+    && /opt/telecrawl-venv/bin/pip install --no-cache-dir opentele2 'telethon>=1.43.2' pycryptodomex sqlcipher3
 
 FROM python:3.12-slim
 RUN apt-get update \
