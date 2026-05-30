@@ -1403,8 +1403,15 @@ def fixture_poll_media() -> bytes:
     return fixture_root_typed_object(media, MESSAGE_METADATA_POLL)
 
 
-def fixture_service_action_media() -> bytes:
-    media = fixture_kv_int32("d", 42) + fixture_kv_int32("dr", 10)
+def fixture_service_action_media(action: str = "call") -> bytes:
+    if action == "title_change":
+        media = fixture_kv_string("t", "Example Title")
+    elif action == "member_change":
+        media = fixture_kv_int32("m", 1001)
+    elif action == "pin":
+        media = fixture_kv_int32("p", 2002)
+    else:
+        media = fixture_kv_int32("d", 42) + fixture_kv_int32("dr", 10)
     return fixture_root_typed_object(media, MESSAGE_METADATA_SERVICE_ACTION)
 
 
@@ -1596,6 +1603,14 @@ def run_self_test(fixture_dir: str) -> None:
         raise AssertionError(f"service metadata title failed: {metadata_sample!r}")
     if metadata_sample[4]["metadata_url"] != "https://example.com/from-text":
         raise AssertionError(f"text URL metadata failed: {metadata_sample!r}")
+    service_samples = [
+        {"text": "", "media_type": "media", "embedded_media": [PostboxDecoder(fixture_service_action_media(action)).decode_root_object()]}
+        for action in ("call", "title_change", "member_change", "pin")
+    ]
+    if attach_message_metadata(service_samples) != 4:
+        raise AssertionError(f"service metadata attach count failed: {service_samples!r}")
+    if [row["metadata_title"] for row in service_samples] != ["call", "title_change", "member_change", "pin"]:
+        raise AssertionError(f"service metadata subtype failed: {service_samples!r}")
     import_module = importlib.import_module
     try:
         def missing_telethon(name: str, package: str | None = None) -> Any:
