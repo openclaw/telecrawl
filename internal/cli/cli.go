@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -164,11 +165,11 @@ func (r *runtime) runDeps(args []string) error {
 }
 
 func depsInstallPackages() []string {
-	return []string{"opentele2", "telethon"}
+	return []string{"opentele2", "telethon>=1.43.2"}
 }
 
 func postboxDepsInstallPackages() []string {
-	return []string{"pycryptodomex", "sqlcipher3", "telethon"}
+	return []string{"pycryptodomex", "sqlcipher3", "telethon>=1.43.2"}
 }
 
 func (r *runtime) withStore(fn func(*store.Store) error) error {
@@ -221,28 +222,40 @@ func (r *runtime) runImport(args []string) error {
 		return usageErr(errors.New("import takes flags only"))
 	}
 	return r.withStore(func(st *store.Store) error {
+		var existingMediaSourcePath string
+		var existingMediaRefs []telegramdesktop.ExistingMediaRef
+		if *fetchMedia {
+			var err error
+			existingMediaSourcePath, existingMediaRefs, err = existingMediaRefsForImport(r.ctx, st)
+			if err != nil {
+				return err
+			}
+		}
 		result, err := telegramdesktop.Import(r.ctx, telegramdesktop.ImportOptions{
-			Path:          *path,
-			Python:        *python,
-			DialogsLimit:  *dialogsLimit,
-			MessagesLimit: *messagesLimit,
-			ChatID:        *chat,
-			FetchMedia:    *fetchMedia,
+			Path:                    *path,
+			Python:                  *python,
+			DialogsLimit:            *dialogsLimit,
+			MessagesLimit:           *messagesLimit,
+			ChatID:                  *chat,
+			FetchMedia:              *fetchMedia,
+			ExistingMediaSourcePath: existingMediaSourcePath,
+			ExistingMediaRefs:       existingMediaRefs,
 		}, st.Path())
 		if err != nil {
 			return err
 		}
-		if err := storeImportResult(r.ctx, st, result, *chat); err != nil {
+		if err := storeImportResult(r.ctx, st, &result, *chat); err != nil {
 			return err
 		}
 		return r.print(result.Stats)
 	})
 }
 
-func storeImportResult(ctx context.Context, st *store.Store, result telegramdesktop.ImportResult, chatFilter string) error {
+func storeImportResult(ctx context.Context, st *store.Store, result *telegramdesktop.ImportResult, chatFilter string) error {
 	if err := preserveExistingMediaRefs(ctx, st, result.Stats.SourcePath, result.Messages); err != nil {
 		return err
 	}
+	refreshImportMediaStats(result)
 	if strings.TrimSpace(chatFilter) == "" {
 		return st.ReplaceAll(ctx, result.Stats, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages)
 	}
@@ -250,7 +263,7 @@ func storeImportResult(ctx context.Context, st *store.Store, result telegramdesk
 		return fmt.Errorf("telegram import returned no chats for --chat %s", chatFilter)
 	}
 	for _, chat := range result.Chats {
-		partial := importResultForChat(result, chat.JID)
+		partial := importResultForChat(*result, chat.JID)
 		if err := st.UpsertChat(ctx, partial.Stats, chat.JID, partial.Chats, partial.Folders, partial.FolderChats, partial.Topics, partial.Messages); err != nil {
 			return err
 		}
@@ -258,49 +271,105 @@ func storeImportResult(ctx context.Context, st *store.Store, result telegramdesk
 	return nil
 }
 
+func refreshImportMediaStats(result *telegramdesktop.ImportResult) {
+	result.Stats.MediaMessages = 0
+	result.Stats.MediaFiles = 0
+	result.Stats.MediaBytes = 0
+	mediaFiles := map[string]int64{}
+	for _, message := range result.Messages {
+		if strings.TrimSpace(message.MediaType) != "" {
+			result.Stats.MediaMessages++
+		}
+		path := strings.TrimSpace(message.MediaPath)
+		if path == "" {
+			continue
+		}
+		if _, ok := mediaFiles[path]; !ok {
+			mediaFiles[path] = message.MediaSize
+		}
+	}
+	for _, size := range mediaFiles {
+		result.Stats.MediaFiles++
+		result.Stats.MediaBytes += size
+	}
+}
+
+func existingMediaRefsForImport(ctx context.Context, st *store.Store) (string, []telegramdesktop.ExistingMediaRef, error) {
+	sourcePath, refsByPK, err := existingMediaRefs(ctx, st)
+	if err != nil || len(refsByPK) == 0 {
+		return sourcePath, nil, err
+	}
+	refs := make([]telegramdesktop.ExistingMediaRef, 0, len(refsByPK))
+	for _, ref := range refsByPK {
+		refs = append(refs, ref)
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].SourcePK < refs[j].SourcePK })
+	return sourcePath, refs, nil
+}
+
 func preserveExistingMediaRefs(ctx context.Context, st *store.Store, sourcePath string, messages []store.Message) error {
 	sourcePath = strings.TrimSpace(sourcePath)
 	if sourcePath == "" {
 		return nil
 	}
-	status, err := st.Status(ctx)
-	if err != nil {
+	existingSourcePath, refs, err := existingMediaRefs(ctx, st)
+	if err != nil || existingSourcePath != sourcePath {
 		return err
-	}
-	if strings.TrimSpace(status.LastSource) != sourcePath {
-		return nil
-	}
-	existing, err := st.Messages(ctx, store.MessageFilter{HasMedia: true, Limit: int(^uint(0) >> 1)})
-	if err != nil {
-		return err
-	}
-	type mediaRef struct {
-		path string
-		size int64
-	}
-	refs := make(map[int64]mediaRef)
-	for _, msg := range existing {
-		path := strings.TrimSpace(msg.MediaPath)
-		if path == "" {
-			continue
-		}
-		refs[msg.SourcePK] = mediaRef{path: path, size: msg.MediaSize}
 	}
 	if len(refs) == 0 {
 		return nil
 	}
 	for i := range messages {
-		if strings.TrimSpace(messages[i].MediaPath) != "" || messages[i].MediaType == "" {
+		if strings.TrimSpace(messages[i].MediaPath) != "" {
 			continue
 		}
 		ref, ok := refs[messages[i].SourcePK]
 		if !ok {
 			continue
 		}
-		messages[i].MediaPath = ref.path
-		messages[i].MediaSize = ref.size
+		if messages[i].MediaType == "" {
+			messages[i].MediaType = ref.MediaType
+		}
+		if messages[i].MediaTitle == "" {
+			messages[i].MediaTitle = ref.MediaTitle
+		}
+		messages[i].MediaPath = ref.MediaPath
+		messages[i].MediaSize = ref.MediaSize
 	}
 	return nil
+}
+
+func existingMediaRefs(ctx context.Context, st *store.Store) (string, map[int64]telegramdesktop.ExistingMediaRef, error) {
+	status, err := st.Status(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	sourcePath := strings.TrimSpace(status.LastSource)
+	if sourcePath == "" {
+		return "", nil, nil
+	}
+	existing, err := st.Messages(ctx, store.MessageFilter{HasMedia: true, Limit: int(^uint(0) >> 1)})
+	if err != nil {
+		return "", nil, err
+	}
+	refs := make(map[int64]telegramdesktop.ExistingMediaRef)
+	for _, msg := range existing {
+		path := strings.TrimSpace(msg.MediaPath)
+		if path == "" {
+			continue
+		}
+		if info, err := os.Stat(path); err != nil || info.IsDir() {
+			continue
+		}
+		refs[msg.SourcePK] = telegramdesktop.ExistingMediaRef{
+			SourcePK:   msg.SourcePK,
+			MediaType:  msg.MediaType,
+			MediaTitle: msg.MediaTitle,
+			MediaPath:  path,
+			MediaSize:  msg.MediaSize,
+		}
+	}
+	return sourcePath, refs, nil
 }
 
 func importResultForChat(result telegramdesktop.ImportResult, chatJID string) telegramdesktop.ImportResult {
@@ -651,8 +720,18 @@ func (r *runtime) print(v any) error {
 			value.SourcePath, value.DBPath, value.Chats, value.Messages, value.MediaMessages, value.MediaFiles, value.MediaBytes, value.StartedAt.Format(time.RFC3339), value.FinishedAt.Format(time.RFC3339)); err != nil {
 			return err
 		}
-		if value.RemoteMediaDownloads != 0 || value.RemoteMediaMissing != 0 {
-			if _, err := fmt.Fprintf(r.stdout, "remote_media_downloads: %d\nremote_media_missing: %d\n", value.RemoteMediaDownloads, value.RemoteMediaMissing); err != nil {
+		if hasRemoteMediaStats(value) {
+			if _, err := fmt.Fprintf(
+				r.stdout,
+				"remote_media_candidates: %d\nremote_media_attempted: %d\nremote_media_downloads: %d\nremote_media_missing: %d\nremote_media_unavailable: %d\nremote_media_timeouts: %d\nremote_media_errors: %d\n",
+				value.RemoteMediaCandidates,
+				value.RemoteMediaAttempted,
+				value.RemoteMediaDownloads,
+				value.RemoteMediaMissing,
+				value.RemoteMediaUnavailable,
+				value.RemoteMediaTimeouts,
+				value.RemoteMediaErrors,
+			); err != nil {
 				return err
 			}
 		}
@@ -661,6 +740,16 @@ func (r *runtime) print(v any) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(v)
 	}
+}
+
+func hasRemoteMediaStats(stats store.ImportStats) bool {
+	return stats.RemoteMediaCandidates != 0 ||
+		stats.RemoteMediaAttempted != 0 ||
+		stats.RemoteMediaDownloads != 0 ||
+		stats.RemoteMediaMissing != 0 ||
+		stats.RemoteMediaUnavailable != 0 ||
+		stats.RemoteMediaTimeouts != 0 ||
+		stats.RemoteMediaErrors != 0
 }
 
 func usageErr(err error) error {

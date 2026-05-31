@@ -25,13 +25,23 @@ var importScript string
 var importPostboxScript string
 
 type ImportOptions struct {
-	Path          string
-	Python        string
-	Session       string
-	DialogsLimit  int
-	MessagesLimit int
-	ChatID        string
-	FetchMedia    bool
+	Path                    string
+	Python                  string
+	Session                 string
+	DialogsLimit            int
+	MessagesLimit           int
+	ChatID                  string
+	FetchMedia              bool
+	ExistingMediaSourcePath string
+	ExistingMediaRefs       []ExistingMediaRef
+}
+
+type ExistingMediaRef struct {
+	SourcePK   int64  `json:"source_pk"`
+	MediaType  string `json:"media_type,omitempty"`
+	MediaTitle string `json:"media_title,omitempty"`
+	MediaPath  string `json:"media_path"`
+	MediaSize  int64  `json:"media_size,omitempty"`
 }
 
 type ImportResult struct {
@@ -48,8 +58,13 @@ type pyResult struct {
 	StartedAt   string `json:"started_at"`
 	FinishedAt  string `json:"finished_at"`
 	RemoteMedia struct {
-		Downloaded int `json:"downloaded"`
-		Missing    int `json:"missing"`
+		Candidates  int `json:"candidates"`
+		Attempted   int `json:"attempted"`
+		Downloaded  int `json:"downloaded"`
+		Missing     int `json:"missing"`
+		Unavailable int `json:"unavailable"`
+		Timeouts    int `json:"timeouts"`
+		Errors      int `json:"errors"`
 	} `json:"remote_media"`
 	Chats []struct {
 		ID            string `json:"id"`
@@ -138,12 +153,20 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 			defer func() { _ = os.RemoveAll(mediaTempDir) }()
 			args = append(args, "--fetch-media", "--media-output-dir", mediaTempDir)
 		}
+		existingRefsPath, cleanupExistingRefs, err := writeExistingMediaRefs(opts, source.path)
+		if err != nil {
+			return ImportResult{}, err
+		}
+		defer cleanupExistingRefs()
+		if existingRefsPath != "" {
+			args = append(args, "--existing-media-refs", existingRefsPath)
+		}
 		if opts.ChatID != "" {
 			args = append(args, "--chat", opts.ChatID)
 		}
 		deps := "pycryptodomex sqlcipher3"
 		if opts.FetchMedia {
-			deps += " telethon"
+			deps += " telethon>=1.43.2"
 		}
 		raw, err := runPythonImporter(ctx, python, "import_postbox.py", importPostboxScript, args, deps)
 		if err != nil {
@@ -177,10 +200,18 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 		defer func() { _ = os.RemoveAll(mediaTempDir) }()
 		args = append(args, "--fetch-media", "--media-output-dir", mediaTempDir)
 	}
+	existingRefsPath, cleanupExistingRefs, err := writeExistingMediaRefs(opts, source.path)
+	if err != nil {
+		return ImportResult{}, err
+	}
+	defer cleanupExistingRefs()
+	if existingRefsPath != "" {
+		args = append(args, "--existing-media-refs", existingRefsPath)
+	}
 	if opts.ChatID != "" {
 		args = append(args, "--chat", opts.ChatID)
 	}
-	raw, err := runPythonImporter(ctx, python, "import_tdata.py", importScript, args, "opentele2 telethon")
+	raw, err := runPythonImporter(ctx, python, "import_tdata.py", importScript, args, "opentele2 telethon>=1.43.2")
 	if err != nil {
 		return ImportResult{}, err
 	}
@@ -213,6 +244,45 @@ func resolveImportSourcePaths(path, tdesktop, postbox string) importSource {
 	return importSource{path: tdesktop}
 }
 
+func writeExistingMediaRefs(opts ImportOptions, sourcePath string) (string, func(), error) {
+	cleanup := func() {}
+	if !opts.FetchMedia || len(opts.ExistingMediaRefs) == 0 || !sameImportSourcePath(opts.ExistingMediaSourcePath, sourcePath) {
+		return "", cleanup, nil
+	}
+	file, err := os.CreateTemp("", "telecrawl-existing-media-*.json")
+	if err != nil {
+		return "", cleanup, fmt.Errorf("create existing media refs: %w", err)
+	}
+	cleanup = func() { _ = os.Remove(file.Name()) }
+	if err := json.NewEncoder(file).Encode(opts.ExistingMediaRefs); err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", func() {}, fmt.Errorf("write existing media refs: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("close existing media refs: %w", err)
+	}
+	return file.Name(), cleanup, nil
+}
+
+func sameImportSourcePath(left, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" || right == "" {
+		return false
+	}
+	leftAbs, err := filepath.Abs(filepath.Clean(left))
+	if err != nil {
+		return false
+	}
+	rightAbs, err := filepath.Abs(filepath.Clean(right))
+	if err != nil {
+		return false
+	}
+	return leftAbs == rightAbs
+}
+
 func runPythonImporter(ctx context.Context, python, scriptName, scriptContent string, args []string, deps string) (pyResult, error) {
 	script, cleanup, err := writeTempScript(scriptName, scriptContent)
 	if err != nil {
@@ -227,11 +297,12 @@ func runPythonImporter(ctx context.Context, python, scriptName, scriptContent st
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
+		installHint := pipInstallHint(deps)
 		if strings.Contains(msg, "missing dependency:") {
-			return pyResult{}, fmt.Errorf("python dependency missing: run `%s -m pip install %s`: %s", python, deps, msg)
+			return pyResult{}, fmt.Errorf("python dependency missing: run `%s -m pip install %s`: %s", python, installHint, msg)
 		}
 		if strings.Contains(msg, "ModuleNotFoundError") || strings.Contains(msg, "No module named") {
-			return pyResult{}, fmt.Errorf("python dependency missing: run `%s -m pip install %s`: %s", python, deps, msg)
+			return pyResult{}, fmt.Errorf("python dependency missing: run `%s -m pip install %s`: %s", python, installHint, msg)
 		}
 		if msg != "" {
 			return pyResult{}, fmt.Errorf("telegram import failed: %w: %s", err, msg)
@@ -245,17 +316,40 @@ func runPythonImporter(ctx context.Context, python, scriptName, scriptContent st
 	return raw, nil
 }
 
+func pipInstallHint(deps string) string {
+	fields := strings.Fields(deps)
+	for i, dep := range fields {
+		fields[i] = shellQuote(dep)
+	}
+	return strings.Join(fields, " ")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(value, " \t\n'\"`$&;<>|()") {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
 func decodeImportResult(raw pyResult, dbPath string) ImportResult {
 	result := ImportResult{}
 	started := parseTime(raw.StartedAt)
 	finished := parseTime(raw.FinishedAt)
 	result.Stats = store.ImportStats{
-		SourcePath:           raw.SourcePath,
-		DBPath:               dbPath,
-		RemoteMediaDownloads: raw.RemoteMedia.Downloaded,
-		RemoteMediaMissing:   raw.RemoteMedia.Missing,
-		StartedAt:            started,
-		FinishedAt:           finished,
+		SourcePath:             raw.SourcePath,
+		DBPath:                 dbPath,
+		RemoteMediaCandidates:  raw.RemoteMedia.Candidates,
+		RemoteMediaAttempted:   raw.RemoteMedia.Attempted,
+		RemoteMediaDownloads:   raw.RemoteMedia.Downloaded,
+		RemoteMediaMissing:     raw.RemoteMedia.Missing,
+		RemoteMediaUnavailable: raw.RemoteMedia.Unavailable,
+		RemoteMediaTimeouts:    raw.RemoteMedia.Timeouts,
+		RemoteMediaErrors:      raw.RemoteMedia.Errors,
+		StartedAt:              started,
+		FinishedAt:             finished,
 	}
 	for _, c := range raw.Chats {
 		result.Chats = append(result.Chats, store.Chat{
@@ -392,7 +486,13 @@ func copyImportedMedia(messages []store.Message, archiveDir string, stats *store
 		}
 		archived, ok := copiedSources[sourcePath]
 		if !ok {
-			archivedPath, size, err := copyMediaFile(sourcePath, archiveDir)
+			archivedPath, size, alreadyArchived, err := existingArchivedMedia(sourcePath, archiveDir)
+			if err != nil {
+				return err
+			}
+			if !alreadyArchived {
+				archivedPath, size, err = copyMediaFile(sourcePath, archiveDir)
+			}
 			if err != nil {
 				if isMediaSourceUnavailable(err) {
 					copiedSources[sourcePath] = archivedMedia{}
@@ -421,6 +521,29 @@ func copyImportedMedia(messages []store.Message, archiveDir string, stats *store
 		}
 	}
 	return nil
+}
+
+func existingArchivedMedia(sourcePath, archiveDir string) (string, int64, bool, error) {
+	sourceAbs, err := filepath.Abs(filepath.Clean(sourcePath))
+	if err != nil {
+		return "", 0, false, fmt.Errorf("resolve media source: %w", err)
+	}
+	archiveAbs, err := filepath.Abs(filepath.Clean(archiveDir))
+	if err != nil {
+		return "", 0, false, fmt.Errorf("resolve media archive: %w", err)
+	}
+	rel, err := filepath.Rel(archiveAbs, sourceAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", 0, false, nil
+	}
+	info, err := os.Stat(sourceAbs)
+	if err != nil {
+		return "", 0, false, nil
+	}
+	if info.IsDir() {
+		return "", 0, false, mediaSourceUnavailableError{path: sourcePath, err: errors.New("is a directory")}
+	}
+	return sourceAbs, info.Size(), true, nil
 }
 
 type mediaSourceUnavailableError struct {

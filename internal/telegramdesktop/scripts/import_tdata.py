@@ -11,6 +11,9 @@ from opentele2.api import UseCurrentSession
 from opentele2.td import TDesktop
 
 
+REMOTE_DOWNLOAD_TIMEOUT_SECONDS = 180
+
+
 def iso(dt):
     if not dt:
         return ""
@@ -106,6 +109,39 @@ def media_size(message):
         return 0
 
 
+def load_existing_media_refs(path):
+    if not path:
+        return {}
+    data = json.loads(Path(path).read_text())
+    refs = {}
+    for item in data:
+        source_pk = str(item.get("source_pk") or "")
+        media_path = str(item.get("media_path") or "")
+        if source_pk and media_path:
+            refs[source_pk] = item
+    return refs
+
+
+async def wait_remote(awaitable, seconds):
+    return await asyncio.wait_for(awaitable, timeout=seconds)
+
+
+def empty_remote_media_stats():
+    return {
+        "candidates": 0,
+        "attempted": 0,
+        "downloaded": 0,
+        "missing": 0,
+        "unavailable": 0,
+        "timeouts": 0,
+        "errors": 0,
+    }
+
+
+def remote_error_key(exc):
+    return "timeouts" if isinstance(exc, TimeoutError) else "errors"
+
+
 def title_text(value):
     if not value:
         return ""
@@ -119,16 +155,16 @@ def title_text(value):
 
 async def download_message_media(client, message, output_dir, chat_id):
     if output_dir is None or not getattr(message, "media", None):
-        return "", 0
+        return "", 0, "unavailable"
     message_dir = output_dir / hashlib.sha256(f"{chat_id}:{message.id}".encode()).hexdigest()
     message_dir.mkdir(parents=True, exist_ok=True)
     try:
-        path = await client.download_media(message, file=str(message_dir))
-    except Exception:
-        return "", 0
+        path = await wait_remote(client.download_media(message, file=str(message_dir)), REMOTE_DOWNLOAD_TIMEOUT_SECONDS)
+    except Exception as exc:
+        return "", 0, remote_error_key(exc)
     if path and Path(path).is_file():
-        return str(path), Path(path).stat().st_size
-    return "", 0
+        return str(path), Path(path).stat().st_size, ""
+    return "", 0, "unavailable"
 
 
 async def load_folders(client):
@@ -242,6 +278,7 @@ async def main():
     parser.add_argument("--chat", default="")
     parser.add_argument("--fetch-media", action="store_true")
     parser.add_argument("--media-output-dir", default="")
+    parser.add_argument("--existing-media-refs", default="")
     args = parser.parse_args()
 
     started = datetime.now(timezone.utc)
@@ -266,8 +303,9 @@ async def main():
     out_messages = []
     out_topics = []
     out_folders = []
-    remote_media = {"downloaded": 0, "missing": 0}
+    remote_media = empty_remote_media_stats()
     media_output_dir = Path(args.media_output_dir).expanduser() if args.fetch_media and args.media_output_dir else None
+    existing_media_refs = load_existing_media_refs(args.existing_media_refs)
     folder_memberships = {}
     if not args.chat:
         out_folders, folder_memberships = await load_folders(client)
@@ -308,18 +346,32 @@ async def main():
                 topic_id = str(msg.id)
             replies = getattr(msg, "replies", None)
             msg_media_type = media_type(msg)
+            msg_media_title = media_title(msg)
             msg_media_path = ""
             msg_media_size = media_size(msg)
+            source_pk_value = stable_pk(chat_id, msg.id)
             if args.fetch_media and msg_media_type:
-                msg_media_path, downloaded_size = await download_message_media(client, msg, media_output_dir, chat_id)
-                if msg_media_path:
-                    msg_media_size = downloaded_size
-                    remote_media["downloaded"] += 1
+                existing_ref = existing_media_refs.get(str(source_pk_value))
+                if existing_ref:
+                    msg_media_path = str(existing_ref.get("media_path") or "")
+                    msg_media_size = int(existing_ref.get("media_size") or 0)
+                    if not msg_media_type:
+                        msg_media_type = str(existing_ref.get("media_type") or "")
+                    if not msg_media_title:
+                        msg_media_title = str(existing_ref.get("media_title") or "")
                 else:
-                    remote_media["missing"] += 1
+                    remote_media["candidates"] += 1
+                    remote_media["attempted"] += 1
+                    msg_media_path, downloaded_size, reason = await download_message_media(client, msg, media_output_dir, chat_id)
+                    if msg_media_path:
+                        msg_media_size = downloaded_size
+                        remote_media["downloaded"] += 1
+                    else:
+                        remote_media["missing"] += 1
+                        remote_media[reason or "unavailable"] += 1
             out_messages.append(
                 {
-                    "source_pk": stable_pk(chat_id, msg.id),
+                    "source_pk": source_pk_value,
                     "chat_id": chat_id,
                     "chat_name": chat_name,
                     "message_id": str(msg.id),
@@ -335,7 +387,7 @@ async def main():
                     "text": text,
                     "message_type": type(msg).__name__,
                     "media_type": msg_media_type,
-                    "media_title": media_title(msg),
+                    "media_title": msg_media_title,
                     "media_path": msg_media_path,
                     "media_size": msg_media_size,
                     "views": int(getattr(msg, "views", 0) or 0),
