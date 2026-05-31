@@ -89,9 +89,12 @@ fetch is attempted, so `--fetch-media` only tries media that is not already in
 the local archive.
 
 Native Postbox can tag link previews, polls, geo/live-geo, service messages, or
-deleted messages as broad media candidates. `telecrawl` tries those during
-`--fetch-media`, but only keeps them as media rows when Telegram returns a
-downloadable file.
+deleted messages as broad media candidates. `telecrawl` archives their decoded
+message metadata separately from binary media, and only keeps them as media rows
+when Telegram returns a downloadable file.
+`metadata_json` is a local source-native Postbox payload for later rendering or
+search; it is not a cross-source schema and can contain private Telegram
+metadata.
 
 When no `--source` is provided on macOS, `telecrawl` checks Telegram Desktop
 `tdata` first, then the native Telegram for macOS group container. No backend
