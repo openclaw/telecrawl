@@ -193,6 +193,34 @@ func TestImportPassesFetchMediaToTDataImporter(t *testing.T) {
 	}
 }
 
+func TestImportPassesExistingMediaRefsToTDataImporter(t *testing.T) {
+	t.Parallel()
+	python, argvPath := fakePythonImporter(t)
+	source := t.TempDir()
+
+	_, err := Import(context.Background(), ImportOptions{
+		Path:                    source,
+		Python:                  python,
+		FetchMedia:              true,
+		ExistingMediaSourcePath: source,
+		ExistingMediaRefs: []ExistingMediaRef{{
+			SourcePK:  42,
+			MediaType: "photo",
+			MediaPath: "/tmp/already-archived",
+			MediaSize: 12,
+		}},
+	}, filepath.Join(t.TempDir(), "telecrawl.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	args := readImporterArgs(t, argvPath)
+	idx := indexArg(args, "--existing-media-refs")
+	if idx < 0 || idx+1 >= len(args) || strings.TrimSpace(args[idx+1]) == "" {
+		t.Fatalf("args missing --existing-media-refs value: %v", args)
+	}
+}
+
 func TestImportPassesExistingMediaRefsToPostboxImporter(t *testing.T) {
 	t.Parallel()
 	python, argvPath := fakePythonImporter(t)
