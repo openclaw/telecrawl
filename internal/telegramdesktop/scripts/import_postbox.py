@@ -507,6 +507,7 @@ def read_source_records(source: PostboxSource, conn: Any, multi_account: bool) -
             "media_path": media_path,
             "media_size": media_size,
             "embedded_media": msg.get("embedded_media") or [],
+            "referenced_media_ids": msg.get("referenced_media_ids") or [],
         })
     return peers, messages
 
@@ -873,6 +874,11 @@ def message_resource_ids(msg: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
+def has_remote_media_identity(msg: dict[str, Any]) -> bool:
+    # Referenced-only Postbox rows still carry enough chat/message identity for Telethon fetch.
+    return bool(message_resource_ids(msg) or msg.get("referenced_media_ids"))
+
+
 def share_duplicate_media(messages: list[dict[str, Any]]) -> int:
     known: dict[tuple[str, int, int, str, str, str], tuple[str, int]] = {}
     for msg in messages:
@@ -923,7 +929,7 @@ def remote_media_candidates(messages: list[dict[str, Any]]) -> list[dict[str, An
     for msg in messages:
         if msg.get("media_path") or not msg.get("media_type"):
             continue
-        if not message_resource_ids(msg):
+        if not has_remote_media_identity(msg):
             continue
         if cloud_media_key(msg) is None:
             continue
@@ -1239,6 +1245,7 @@ def build_result(
         msg.pop("_account_id", None)
         msg.pop("_access_hash", None)
         msg.pop("embedded_media", None)
+        msg.pop("referenced_media_ids", None)
         chat_id = msg["chat_id"]
         chat = chats.setdefault(chat_id, {
             "id": chat_id,
@@ -1556,10 +1563,11 @@ def run_self_test(fixture_dir: str) -> None:
         {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "1:4", "media_type": "photo", "media_path": "", "embedded_media": [remote_resource]},
         {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:5", "media_type": "", "media_path": "", "embedded_media": [remote_resource]},
         {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:6", "media_type": "web_page", "media_path": "", "embedded_media": []},
+        {"_raw_chat_id": str(fixture_postbox_peer_id(0, 777000)), "message_id": "0:7", "media_type": "media", "media_path": "", "embedded_media": [], "referenced_media_ids": [(7, 123456789)]},
     ]
-    if [row["message_id"] for row in remote_media_candidates(remote_sample)] != ["0:1"]:
+    if [row["message_id"] for row in remote_media_candidates(remote_sample)] != ["0:1", "0:7"]:
         raise AssertionError(f"remote media candidate selection failed: {remote_sample!r}")
-    if remote_media_missing_count(remote_sample) != 1:
+    if remote_media_missing_count(remote_sample) != 2:
         raise AssertionError(f"remote missing count failed: {remote_sample!r}")
     existing_ref_sample = [
         {"source_pk": 10, "message_id": "0:10", "media_type": "photo", "media_path": ""},
@@ -1623,7 +1631,7 @@ def run_self_test(fixture_dir: str) -> None:
     finally:
         importlib.import_module = import_module
     if result != {
-        "candidates": 1,
+        "candidates": 2,
         "attempted": 0,
         "downloaded": 0,
         "missing": 1,
