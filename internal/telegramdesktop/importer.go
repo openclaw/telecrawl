@@ -223,6 +223,14 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 		defer func() { _ = os.RemoveAll(mediaTempDir) }()
 		args = append(args, "--fetch-media", "--media-output-dir", mediaTempDir)
 	}
+	existingRefsPath, cleanupExistingRefs, err := writeExistingMediaRefs(opts, source.path)
+	if err != nil {
+		return ImportResult{}, err
+	}
+	defer cleanupExistingRefs()
+	if existingRefsPath != "" {
+		args = append(args, "--existing-media-refs", existingRefsPath)
+	}
 	if opts.ChatID != "" {
 		args = append(args, "--chat", opts.ChatID)
 	}
