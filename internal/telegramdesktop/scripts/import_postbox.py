@@ -1940,6 +1940,7 @@ def main() -> None:
         share_duplicate_media(limited)
         share_resource_media(limited)
     source_path = str(Path(args.source).expanduser()) if args.source else str(default_group_path())
+    # Full imports refresh account-level contacts; targeted chat imports keep contacts scoped to exported messages.
     contacts = list(all_contacts.values())
     if args.chat:
         contacts = filter_contacts_for_messages(contacts, limited)
