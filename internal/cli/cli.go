@@ -102,6 +102,8 @@ func (r *runtime) dispatch(args []string) error {
 		return r.runChats(args[1:])
 	case "folders":
 		return r.runFolders(args[1:])
+	case "contacts":
+		return r.runContacts(args[1:])
 	case "topics":
 		return r.runTopics(args[1:])
 	case "messages":
@@ -257,14 +259,14 @@ func storeImportResult(ctx context.Context, st *store.Store, result *telegramdes
 	}
 	refreshImportMediaStats(result)
 	if strings.TrimSpace(chatFilter) == "" {
-		return st.ReplaceAll(ctx, result.Stats, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages)
+		return st.ReplaceAll(ctx, result.Stats, result.Contacts, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages)
 	}
 	if len(result.Chats) == 0 {
 		return fmt.Errorf("telegram import returned no chats for --chat %s", chatFilter)
 	}
 	for _, chat := range result.Chats {
 		partial := importResultForChat(*result, chat.JID)
-		if err := st.UpsertChat(ctx, partial.Stats, chat.JID, partial.Chats, partial.Folders, partial.FolderChats, partial.Topics, partial.Messages); err != nil {
+		if err := st.UpsertChat(ctx, partial.Stats, chat.JID, partial.Contacts, partial.Chats, partial.Folders, partial.FolderChats, partial.Topics, partial.Messages); err != nil {
 			return err
 		}
 	}
@@ -394,6 +396,29 @@ func importResultForChat(result telegramdesktop.ImportResult, chatJID string) te
 			out.Messages = append(out.Messages, message)
 		}
 	}
+	out.Contacts = contactsForMessages(result.Contacts, out.Messages, chatJID)
+	return out
+}
+
+func contactsForMessages(contacts []store.Contact, messages []store.Message, chatJID string) []store.Contact {
+	peerIDs := map[string]struct{}{}
+	if strings.TrimSpace(chatJID) != "" {
+		peerIDs[chatJID] = struct{}{}
+	}
+	for _, message := range messages {
+		if strings.TrimSpace(message.ChatJID) != "" {
+			peerIDs[message.ChatJID] = struct{}{}
+		}
+		if strings.TrimSpace(message.SenderJID) != "" {
+			peerIDs[message.SenderJID] = struct{}{}
+		}
+	}
+	out := make([]store.Contact, 0, len(peerIDs))
+	for _, contact := range contacts {
+		if _, ok := peerIDs[contact.JID]; ok {
+			out = append(out, contact)
+		}
+	}
 	return out
 }
 
@@ -437,6 +462,25 @@ func (r *runtime) runFolders(args []string) error {
 			return err
 		}
 		return r.print(folders)
+	})
+}
+
+func (r *runtime) runContacts(args []string) error {
+	fs := flag.NewFlagSet("telecrawl contacts", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	limit := fs.Int("limit", 100, "")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() != 0 {
+		return usageErr(errors.New("contacts takes flags only"))
+	}
+	return r.withStore(func(st *store.Store) error {
+		contacts, err := st.ListContacts(r.ctx, *limit)
+		if err != nil {
+			return err
+		}
+		return r.print(contacts)
 	})
 }
 
@@ -765,6 +809,7 @@ usage:
   telecrawl [--json] import [--path PATH] [--chat ID] [--dialogs-limit N] [--messages-limit N] [--fetch-media]
   telecrawl [--json] status
   telecrawl [--json] folders
+  telecrawl [--json] contacts [--limit N]
   telecrawl [--json] chats [--limit N] [--unread] [--folder ID]
   telecrawl [--json] topics --chat ID [--limit N]
   telecrawl [--json] messages [--chat ID] [--topic ID] [--limit N] [--after DATE]

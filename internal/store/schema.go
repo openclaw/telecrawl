@@ -47,6 +47,7 @@ create table if not exists topics (
 
 create table if not exists contacts (
 	jid text primary key,
+	peer_type text,
 	phone text,
 	full_name text,
 	first_name text,
@@ -55,6 +56,7 @@ create table if not exists contacts (
 	username text,
 	lid text,
 	about_text text,
+	avatar_path text,
 	updated_at integer
 );
 

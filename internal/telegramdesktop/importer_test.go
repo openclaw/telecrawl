@@ -124,6 +124,43 @@ func TestCopyImportedMediaArchivesByContentHash(t *testing.T) {
 	}
 }
 
+func TestCopyImportedContactAvatarsArchivesByContentHash(t *testing.T) {
+	t.Parallel()
+	source := filepath.Join(t.TempDir(), "source-avatar")
+	if err := os.WriteFile(source, []byte("fixture avatar"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	contacts := []store.Contact{
+		{JID: "1", AvatarPath: source},
+		{JID: "2", AvatarPath: source},
+		{JID: "3", AvatarPath: filepath.Join(t.TempDir(), "missing-avatar")},
+	}
+	archiveDir := filepath.Join(t.TempDir(), "media")
+
+	if err := copyImportedContactAvatars(contacts, archiveDir); err != nil {
+		t.Fatal(err)
+	}
+	if contacts[0].AvatarPath == source {
+		t.Fatal("avatar path still points at source cache")
+	}
+	if contacts[1].AvatarPath != contacts[0].AvatarPath {
+		t.Fatalf("duplicate avatar archived to different paths: %q != %q", contacts[1].AvatarPath, contacts[0].AvatarPath)
+	}
+	if contacts[2].AvatarPath != "" {
+		t.Fatalf("missing avatar path = %q, want cleared", contacts[2].AvatarPath)
+	}
+	data, err := os.ReadFile(contacts[0].AvatarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "fixture avatar" {
+		t.Fatalf("archived avatar = %q", data)
+	}
+	if !strings.HasPrefix(contacts[0].AvatarPath, archiveDir+string(os.PathSeparator)) {
+		t.Fatalf("avatar path %q is not under archive dir %q", contacts[0].AvatarPath, archiveDir)
+	}
+}
+
 func TestCopyImportedMediaKeepsExistingArchiveRef(t *testing.T) {
 	t.Parallel()
 	archiveDir := filepath.Join(t.TempDir(), "media")

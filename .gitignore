@@ -1,4 +1,6 @@
 /telecrawl
 coverage.out
 dist/
+__pycache__/
+*.pyc
 .DS_Store

@@ -2,6 +2,10 @@
 
 ## [0.2.1] - Unreleased
 
+### Added
+
+- Archive Telegram contact records from local Postbox imports. (#7; thanks @joshp123)
+
 ## [0.2.0] - 2026-05-31
 
 ### Added

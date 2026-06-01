@@ -46,6 +46,7 @@ type ExistingMediaRef struct {
 
 type ImportResult struct {
 	Stats       store.ImportStats
+	Contacts    []store.Contact
 	Chats       []store.Chat
 	Folders     []store.Folder
 	FolderChats []store.FolderChat
@@ -77,6 +78,20 @@ type pyResult struct {
 		FolderID      string `json:"folder_id"`
 		Forum         bool   `json:"forum"`
 	} `json:"chats"`
+	Contacts []struct {
+		ID           string `json:"id"`
+		PeerType     string `json:"peer_type"`
+		Phone        string `json:"phone"`
+		FullName     string `json:"full_name"`
+		FirstName    string `json:"first_name"`
+		LastName     string `json:"last_name"`
+		BusinessName string `json:"business_name"`
+		Username     string `json:"username"`
+		LID          string `json:"lid"`
+		AboutText    string `json:"about_text"`
+		AvatarPath   string `json:"avatar_path"`
+		UpdatedAt    string `json:"updated_at"`
+	} `json:"contacts"`
 	Folders []struct {
 		ID        string `json:"id"`
 		Title     string `json:"title"`
@@ -177,7 +192,11 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 			return ImportResult{}, err
 		}
 		result := decodeImportResult(raw, dbPath)
-		if err := copyImportedMedia(result.Messages, mediaArchiveDir(dbPath), &result.Stats); err != nil {
+		archiveDir := mediaArchiveDir(dbPath)
+		if err := copyImportedContactAvatars(result.Contacts, archiveDir); err != nil {
+			return ImportResult{}, err
+		}
+		if err := copyImportedMedia(result.Messages, archiveDir, &result.Stats); err != nil {
 			return ImportResult{}, err
 		}
 		return result, nil
@@ -220,7 +239,11 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 		return ImportResult{}, err
 	}
 	result := decodeImportResult(raw, dbPath)
-	if err := copyImportedMedia(result.Messages, mediaArchiveDir(dbPath), &result.Stats); err != nil {
+	archiveDir := mediaArchiveDir(dbPath)
+	if err := copyImportedContactAvatars(result.Contacts, archiveDir); err != nil {
+		return ImportResult{}, err
+	}
+	if err := copyImportedMedia(result.Messages, archiveDir, &result.Stats); err != nil {
 		return ImportResult{}, err
 	}
 	return result, nil
@@ -366,6 +389,22 @@ func decodeImportResult(raw pyResult, dbPath string) ImportResult {
 			MessageCount:  c.MessageCount,
 			FolderID:      c.FolderID,
 			Forum:         c.Forum,
+		})
+	}
+	for _, c := range raw.Contacts {
+		result.Contacts = append(result.Contacts, store.Contact{
+			JID:          c.ID,
+			PeerType:     c.PeerType,
+			Phone:        c.Phone,
+			FullName:     c.FullName,
+			FirstName:    c.FirstName,
+			LastName:     c.LastName,
+			BusinessName: c.BusinessName,
+			Username:     c.Username,
+			LID:          c.LID,
+			AboutText:    c.AboutText,
+			AvatarPath:   c.AvatarPath,
+			UpdatedAt:    parseTime(c.UpdatedAt),
 		})
 	}
 	for _, f := range raw.Folders {
@@ -527,6 +566,38 @@ func copyImportedMedia(messages []store.Message, archiveDir string, stats *store
 			stats.MediaFiles++
 			stats.MediaBytes += size
 		}
+	}
+	return nil
+}
+
+func copyImportedContactAvatars(contacts []store.Contact, archiveDir string) error {
+	copiedSources := make(map[string]string)
+	for i := range contacts {
+		sourcePath := strings.TrimSpace(contacts[i].AvatarPath)
+		if sourcePath == "" {
+			continue
+		}
+		archivedPath, ok := copiedSources[sourcePath]
+		if !ok {
+			path, _, alreadyArchived, err := existingArchivedMedia(sourcePath, archiveDir)
+			if err != nil {
+				return err
+			}
+			if !alreadyArchived {
+				path, _, err = copyMediaFile(sourcePath, archiveDir)
+			}
+			if err != nil {
+				if isMediaSourceUnavailable(err) {
+					copiedSources[sourcePath] = ""
+					contacts[i].AvatarPath = ""
+					continue
+				}
+				return err
+			}
+			archivedPath = path
+			copiedSources[sourcePath] = archivedPath
+		}
+		contacts[i].AvatarPath = archivedPath
 	}
 	return nil
 }

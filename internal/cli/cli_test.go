@@ -63,6 +63,20 @@ func TestStoreImportResultUpsertsReturnedAccountScopedChats(t *testing.T) {
 	}
 }
 
+func TestImportResultForChatFiltersContacts(t *testing.T) {
+	result := accountScopedImportResult("filtered")
+	partial := importResultForChat(result, "111")
+
+	got := make([]string, 0, len(partial.Contacts))
+	for _, contact := range partial.Contacts {
+		got = append(got, contact.JID)
+	}
+	want := []string{"111", "10"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("contacts = %v, want %v", got, want)
+	}
+}
+
 func TestStoreImportResultPreservesArchivedMediaOnReimport(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "telecrawl.db"))
@@ -271,13 +285,20 @@ func accountScopedImportResult(label string) telegramdesktop.ImportResult {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	return telegramdesktop.ImportResult{
 		Stats: store.ImportStats{SourcePath: "postbox", StartedAt: now, FinishedAt: now},
+		Contacts: []store.Contact{
+			{JID: "111", FullName: "Account A"},
+			{JID: "10", FullName: "Sender A"},
+			{JID: "222", FullName: "Account B"},
+			{JID: "20", FullName: "Sender B"},
+			{JID: "999", FullName: "Unrelated"},
+		},
 		Chats: []store.Chat{
 			{JID: "111", Kind: "chat", Name: "account a", LastMessageAt: now, MessageCount: 1},
 			{JID: "222", Kind: "chat", Name: "account b", LastMessageAt: now, MessageCount: 1},
 		},
 		Messages: []store.Message{
-			{SourcePK: 1, ChatJID: "111", ChatName: "account a", MessageID: "0:1", Timestamp: now, Text: label + " a"},
-			{SourcePK: 2, ChatJID: "222", ChatName: "account b", MessageID: "0:1", Timestamp: now, Text: label + " b"},
+			{SourcePK: 1, ChatJID: "111", ChatName: "account a", MessageID: "0:1", SenderJID: "10", Timestamp: now, Text: label + " a"},
+			{SourcePK: 2, ChatJID: "222", ChatName: "account b", MessageID: "0:1", SenderJID: "20", Timestamp: now, Text: label + " b"},
 		},
 	}
 }
