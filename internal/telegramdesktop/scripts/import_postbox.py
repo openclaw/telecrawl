@@ -245,6 +245,9 @@ def read_passcodes(value: str | None) -> list[bytes]:
 
 
 def tempkey_key(passcode: bytes) -> tuple[bytes, bytes]:
+    # Telegram Desktop derives the local tempkey AES key/IV with raw SHA512;
+    # this mirrors that file format and is not application password storage.
+    # codeql[py/weak-sensitive-data-hashing]
     digest = hashlib.sha512(passcode).digest()
     return digest[:32], digest[-16:]
 
