@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -74,6 +75,115 @@ func TestImportResultForChatFiltersContacts(t *testing.T) {
 	want := []string{"111", "10"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("contacts = %v, want %v", got, want)
+	}
+}
+
+func TestContactsExportUsesContractShapeAndSkipsUnsafeNames(t *testing.T) {
+	ctx := context.Background()
+	db := filepath.Join(t.TempDir(), "telecrawl.db")
+	st, err := store.Open(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	contacts := make([]store.Contact, 0, 104)
+	for i := 0; i < 101; i++ {
+		contacts = append(contacts, store.Contact{
+			JID:      "safe-" + string(rune('a'+(i%26))) + "-" + string(rune('a'+((i/26)%26))),
+			Phone:    "+1555010" + strings.Repeat("0", 3-len(string(rune('0'+(i%10))))) + string(rune('0'+(i%10))),
+			FullName: "Safe Person",
+		})
+	}
+	contacts = append(contacts,
+		store.Contact{JID: "first-last", Phone: "+15559990001", FirstName: "First", LastName: "Last"},
+		store.Contact{JID: "username-only", Phone: "+15559990002", Username: "handle", FullName: "@handle"},
+		store.Contact{JID: "phone-only", Phone: "+15559990003", FullName: "+15559990003"},
+		store.Contact{JID: "jid-only", Phone: "+15559990004", FullName: "jid-only"},
+		store.Contact{JID: "blank-name", Phone: "+15559990005"},
+		store.Contact{JID: "no-phone", FullName: "No Phone"},
+	)
+	if err := st.ReplaceAll(ctx, store.ImportStats{}, contacts, nil, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	err = Run(ctx, []string{"--json", "--db", db, "contacts", "export"}, &out, &errOut)
+	if err != nil {
+		t.Fatalf("contacts export: %v stderr=%s", err, errOut.String())
+	}
+	var payload struct {
+		Contacts []struct {
+			DisplayName  string   `json:"display_name"`
+			PhoneNumbers []string `json:"phone_numbers"`
+			JID          string   `json:"jid"`
+			Username     string   `json:"username"`
+		} `json:"contacts"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("json = %s err=%v", out.String(), err)
+	}
+	assertContactExportKeys(t, out.Bytes())
+	if len(payload.Contacts) != 102 {
+		t.Fatalf("contacts = %d, want 102", len(payload.Contacts))
+	}
+	var sawFirstLast bool
+	for _, contact := range payload.Contacts {
+		if contact.DisplayName == "First Last" {
+			sawFirstLast = true
+		}
+		if contact.DisplayName == "" || len(contact.PhoneNumbers) != 1 {
+			t.Fatalf("bad contact = %#v", contact)
+		}
+		if contact.JID != "" || contact.Username != "" {
+			t.Fatalf("leaked source fields = %#v", contact)
+		}
+		if strings.HasPrefix(contact.DisplayName, "@") || strings.HasPrefix(contact.DisplayName, "+") || contact.DisplayName == "jid-only" {
+			t.Fatalf("unsafe display name exported: %#v", contact)
+		}
+	}
+	if !sawFirstLast {
+		t.Fatalf("missing composed first/last name: %#v", payload.Contacts)
+	}
+}
+
+func assertContactExportKeys(t *testing.T, data []byte) {
+	t.Helper()
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	contactsJSON, ok := root["contacts"]
+	if !ok || len(root) != 1 {
+		t.Fatalf("root keys = %#v, want only contacts", root)
+	}
+	var contacts []map[string]json.RawMessage
+	if err := json.Unmarshal(contactsJSON, &contacts); err != nil {
+		t.Fatal(err)
+	}
+	for _, contact := range contacts {
+		if _, ok := contact["display_name"]; !ok {
+			t.Fatalf("contact keys = %#v, missing display_name", contact)
+		}
+		if _, ok := contact["phone_numbers"]; !ok {
+			t.Fatalf("contact keys = %#v, missing phone_numbers", contact)
+		}
+		if len(contact) != 2 {
+			t.Fatalf("contact keys = %#v, want only display_name and phone_numbers", contact)
+		}
+	}
+}
+
+func TestMetadataAdvertisesContactExport(t *testing.T) {
+	manifest := controlManifest()
+	command, ok := manifest.Commands["contact-export"]
+	if !ok {
+		t.Fatalf("commands = %#v", manifest.Commands)
+	}
+	if command.Mutates || !command.JSON {
+		t.Fatalf("contact-export command = %#v", command)
+	}
+	want := []string{"telecrawl", "--json", "contacts", "export"}
+	if !slices.Equal(command.Argv, want) {
+		t.Fatalf("argv = %#v, want %#v", command.Argv, want)
 	}
 }
 

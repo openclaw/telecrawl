@@ -79,6 +79,10 @@ func (s *Store) ListContacts(ctx context.Context, limit int) ([]Contact, error) 
 	return s.contacts(ctx, limit)
 }
 
+func (s *Store) ExportContacts(ctx context.Context) ([]Contact, error) {
+	return s.allContacts(ctx)
+}
+
 func (s *Store) allContacts(ctx context.Context) ([]Contact, error) {
 	return s.contacts(ctx, 0)
 }
