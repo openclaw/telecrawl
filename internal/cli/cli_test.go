@@ -111,6 +111,10 @@ func TestContactsExportUsesContractShapeAndSkipsUnsafeNames(t *testing.T) {
 	}
 	addContact(store.Contact{JID: "first-last", Phone: "+15559990001", FirstName: "First", LastName: "Last"}, true)
 	addContact(store.Contact{JID: "first-last-duplicate", Phone: "+15559990001", FirstName: "First", LastName: "Last"}, true)
+	addContact(store.Contact{JID: "recent-short", Phone: "+15559990008", FullName: "Recent", UpdatedAt: time.Unix(200, 0).UTC()}, true)
+	addContact(store.Contact{JID: "older-richer", Phone: "+15559990008", FullName: "Older Richer Name", UpdatedAt: time.Unix(100, 0).UTC()}, true)
+	addContact(store.Contact{JID: "equal-short", Phone: "+15559990009", FullName: "Pim"}, true)
+	addContact(store.Contact{JID: "equal-richer", Phone: "+15559990009", FullName: "Pim van den Berg"}, true)
 	addContact(store.Contact{JID: "username-only", Phone: "+15559990002", Username: "handle", FullName: "@handle"}, true)
 	addContact(store.Contact{JID: "bare-username-only", Phone: "+15559990006", Username: "handle", FullName: "Handle"}, true)
 	addContact(store.Contact{JID: "phone-only", Phone: "+15559990003", FullName: "+15559990003"}, true)
@@ -140,10 +144,10 @@ func TestContactsExportUsesContractShapeAndSkipsUnsafeNames(t *testing.T) {
 		t.Fatalf("json = %s err=%v", out.String(), err)
 	}
 	assertContactExportKeys(t, out.Bytes())
-	if len(payload.Contacts) != 103 {
-		t.Fatalf("contacts = %d, want 103", len(payload.Contacts))
+	if len(payload.Contacts) != 105 {
+		t.Fatalf("contacts = %d, want 105", len(payload.Contacts))
 	}
-	var sawFirstLast, sawShortPhonePerson bool
+	var sawFirstLast, sawShortPhonePerson, sawRecent, sawRicherEqual bool
 	firstLastCount := 0
 	for _, contact := range payload.Contacts {
 		if contact.DisplayName == "First Last" {
@@ -151,6 +155,12 @@ func TestContactsExportUsesContractShapeAndSkipsUnsafeNames(t *testing.T) {
 			if contact.PhoneNumbers[0] == "+15559990001" {
 				firstLastCount++
 			}
+		}
+		if contact.DisplayName == "Recent" && contact.PhoneNumbers[0] == "+15559990008" {
+			sawRecent = true
+		}
+		if contact.DisplayName == "Pim van den Berg" && contact.PhoneNumbers[0] == "+15559990009" {
+			sawRicherEqual = true
 		}
 		if contact.DisplayName == "Short Phone Person" && contact.PhoneNumbers[0] == "12345" {
 			sawShortPhonePerson = true
@@ -170,6 +180,9 @@ func TestContactsExportUsesContractShapeAndSkipsUnsafeNames(t *testing.T) {
 		if contact.DisplayName == "Stale Peer" {
 			t.Fatalf("stale contact without conversation evidence exported: %#v", contact)
 		}
+		if contact.DisplayName == "Older Richer Name" || contact.DisplayName == "Pim" {
+			t.Fatalf("wrong duplicate contact name exported: %#v", contact)
+		}
 	}
 	if !sawFirstLast {
 		t.Fatalf("missing composed first/last name: %#v", payload.Contacts)
@@ -179,6 +192,12 @@ func TestContactsExportUsesContractShapeAndSkipsUnsafeNames(t *testing.T) {
 	}
 	if !sawShortPhonePerson {
 		t.Fatalf("missing short phone person: %#v", payload.Contacts)
+	}
+	if !sawRecent {
+		t.Fatalf("missing newer duplicate contact name: %#v", payload.Contacts)
+	}
+	if !sawRicherEqual {
+		t.Fatalf("missing richer equal-time contact name: %#v", payload.Contacts)
 	}
 }
 

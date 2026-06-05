@@ -517,7 +517,8 @@ func (r *runtime) runContactsExport(args []string) error {
 
 func exportContacts(contacts []store.Contact) []exportedContact {
 	out := make([]exportedContact, 0, len(contacts))
-	seen := map[string]struct{}{}
+	byPhone := map[string]store.Contact{}
+	phoneOrder := make([]string, 0, len(contacts))
 	for _, contact := range contacts {
 		if isTelegramServiceContact(contact) {
 			continue
@@ -527,14 +528,31 @@ func exportContacts(contacts []store.Contact) []exportedContact {
 		if name == "" || phone == "" {
 			continue
 		}
-		key := name + "\x00" + phone
-		if _, ok := seen[key]; ok {
-			continue
+		if current, ok := byPhone[phone]; ok {
+			if preferContactExportName(contact, current) {
+				byPhone[phone] = contact
+			}
+		} else {
+			byPhone[phone] = contact
+			phoneOrder = append(phoneOrder, phone)
 		}
-		seen[key] = struct{}{}
+	}
+	for _, phone := range phoneOrder {
+		contact := byPhone[phone]
+		name := contactDisplayName(contact)
 		out = append(out, exportedContact{DisplayName: name, PhoneNumbers: []string{phone}})
 	}
 	return out
+}
+
+func preferContactExportName(candidate, current store.Contact) bool {
+	if candidate.UpdatedAt.After(current.UpdatedAt) {
+		return true
+	}
+	if current.UpdatedAt.After(candidate.UpdatedAt) {
+		return false
+	}
+	return len([]rune(contactDisplayName(candidate))) > len([]rune(contactDisplayName(current)))
 }
 
 func contactDisplayName(contact store.Contact) string {
