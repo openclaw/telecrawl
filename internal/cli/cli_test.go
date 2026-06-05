@@ -94,13 +94,16 @@ func TestContactsExportUsesContractShapeAndSkipsUnsafeNames(t *testing.T) {
 			FullName: "Safe Person",
 		})
 	}
-	contacts = append(contacts,
+	contacts = append(
+		contacts,
 		store.Contact{JID: "first-last", Phone: "+15559990001", FirstName: "First", LastName: "Last"},
 		store.Contact{JID: "username-only", Phone: "+15559990002", Username: "handle", FullName: "@handle"},
+		store.Contact{JID: "bare-username-only", Phone: "+15559990006", Username: "handle", FullName: "Handle"},
 		store.Contact{JID: "phone-only", Phone: "+15559990003", FullName: "+15559990003"},
 		store.Contact{JID: "jid-only", Phone: "+15559990004", FullName: "jid-only"},
 		store.Contact{JID: "blank-name", Phone: "+15559990005"},
 		store.Contact{JID: "no-phone", FullName: "No Phone"},
+		store.Contact{JID: "short-code", Phone: "42777", FullName: "Telegram"},
 	)
 	if err := st.ReplaceAll(ctx, store.ImportStats{}, contacts, nil, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
@@ -138,6 +141,9 @@ func TestContactsExportUsesContractShapeAndSkipsUnsafeNames(t *testing.T) {
 		}
 		if strings.HasPrefix(contact.DisplayName, "@") || strings.HasPrefix(contact.DisplayName, "+") || contact.DisplayName == "jid-only" {
 			t.Fatalf("unsafe display name exported: %#v", contact)
+		}
+		if contact.DisplayName == "Handle" || contact.PhoneNumbers[0] == "42777" {
+			t.Fatalf("unsafe contact exported: %#v", contact)
 		}
 	}
 	if !sawFirstLast {
