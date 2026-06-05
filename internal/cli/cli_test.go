@@ -103,7 +103,8 @@ func TestContactsExportUsesContractShapeAndSkipsUnsafeNames(t *testing.T) {
 		store.Contact{JID: "jid-only", Phone: "+15559990004", FullName: "jid-only"},
 		store.Contact{JID: "blank-name", Phone: "+15559990005"},
 		store.Contact{JID: "no-phone", FullName: "No Phone"},
-		store.Contact{JID: "short-code", Phone: "42777", FullName: "Telegram"},
+		store.Contact{JID: "short-phone-person", Phone: "12345", FullName: "Short Phone Person"},
+		store.Contact{JID: "telegram-service", Phone: "42777", FullName: "Telegram", FirstName: "Telegram"},
 	)
 	if err := st.ReplaceAll(ctx, store.ImportStats{}, contacts, nil, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
@@ -125,13 +126,16 @@ func TestContactsExportUsesContractShapeAndSkipsUnsafeNames(t *testing.T) {
 		t.Fatalf("json = %s err=%v", out.String(), err)
 	}
 	assertContactExportKeys(t, out.Bytes())
-	if len(payload.Contacts) != 102 {
-		t.Fatalf("contacts = %d, want 102", len(payload.Contacts))
+	if len(payload.Contacts) != 103 {
+		t.Fatalf("contacts = %d, want 103", len(payload.Contacts))
 	}
-	var sawFirstLast bool
+	var sawFirstLast, sawShortPhonePerson bool
 	for _, contact := range payload.Contacts {
 		if contact.DisplayName == "First Last" {
 			sawFirstLast = true
+		}
+		if contact.DisplayName == "Short Phone Person" && contact.PhoneNumbers[0] == "12345" {
+			sawShortPhonePerson = true
 		}
 		if contact.DisplayName == "" || len(contact.PhoneNumbers) != 1 {
 			t.Fatalf("bad contact = %#v", contact)
@@ -148,6 +152,9 @@ func TestContactsExportUsesContractShapeAndSkipsUnsafeNames(t *testing.T) {
 	}
 	if !sawFirstLast {
 		t.Fatalf("missing composed first/last name: %#v", payload.Contacts)
+	}
+	if !sawShortPhonePerson {
+		t.Fatalf("missing short phone person: %#v", payload.Contacts)
 	}
 }
 

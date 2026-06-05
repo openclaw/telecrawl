@@ -518,8 +518,11 @@ func (r *runtime) runContactsExport(args []string) error {
 func exportContacts(contacts []store.Contact) []exportedContact {
 	out := make([]exportedContact, 0, len(contacts))
 	for _, contact := range contacts {
+		if isTelegramServiceContact(contact) {
+			continue
+		}
 		name := contactDisplayName(contact)
-		phone := contactPhoneNumber(contact.Phone)
+		phone := strings.TrimSpace(contact.Phone)
 		if name == "" || phone == "" {
 			continue
 		}
@@ -563,25 +566,12 @@ func sameContactText(a, b string) bool {
 	return a != "" && b != "" && strings.EqualFold(a, b)
 }
 
-func contactPhoneNumber(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	digits := 0
-	for _, r := range value {
-		switch {
-		case unicode.IsDigit(r):
-			digits++
-		case strings.ContainsRune(" +()-.", r):
-		default:
-			return ""
-		}
-	}
-	if digits < 7 || digits > 15 {
-		return ""
-	}
-	return value
+func isTelegramServiceContact(contact store.Contact) bool {
+	return strings.TrimSpace(contact.Phone) == "42777" &&
+		sameContactText(contact.FullName, "Telegram") &&
+		sameContactText(contact.FirstName, "Telegram") &&
+		strings.TrimSpace(contact.LastName) == "" &&
+		strings.TrimSpace(contact.Username) == ""
 }
 
 func looksLikePhone(value string) bool {
