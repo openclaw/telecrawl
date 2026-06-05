@@ -902,7 +902,7 @@ usage:
   telecrawl [--json] status
   telecrawl [--json] folders
   telecrawl [--json] contacts [--limit N]
-  telecrawl --json contacts export
+  telecrawl [--json] contacts export
   telecrawl [--json] chats [--limit N] [--unread] [--folder ID]
   telecrawl [--json] topics --chat ID [--limit N]
   telecrawl [--json] messages [--chat ID] [--topic ID] [--limit N] [--after DATE]
