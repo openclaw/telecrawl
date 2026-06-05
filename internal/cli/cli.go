@@ -517,6 +517,7 @@ func (r *runtime) runContactsExport(args []string) error {
 
 func exportContacts(contacts []store.Contact) []exportedContact {
 	out := make([]exportedContact, 0, len(contacts))
+	seen := map[string]struct{}{}
 	for _, contact := range contacts {
 		if isTelegramServiceContact(contact) {
 			continue
@@ -526,6 +527,11 @@ func exportContacts(contacts []store.Contact) []exportedContact {
 		if name == "" || phone == "" {
 			continue
 		}
+		key := name + "\x00" + phone
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
 		out = append(out, exportedContact{DisplayName: name, PhoneNumbers: []string{phone}})
 	}
 	return out

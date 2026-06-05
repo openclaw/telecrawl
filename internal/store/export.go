@@ -80,7 +80,12 @@ func (s *Store) ListContacts(ctx context.Context, limit int) ([]Contact, error) 
 }
 
 func (s *Store) ExportContacts(ctx context.Context) ([]Contact, error) {
-	return s.allContacts(ctx)
+	query := `select jid,coalesce(peer_type,''),coalesce(phone,''),coalesce(full_name,''),coalesce(first_name,''),coalesce(last_name,''),coalesce(business_name,''),coalesce(username,''),coalesce(lid,''),coalesce(about_text,''),coalesce(avatar_path,''),coalesce(updated_at,0)
+from contacts c
+where exists (select 1 from chats ch where cast(ch.id as text)=c.jid)
+   or exists (select 1 from messages m where m.chat_jid=c.jid or m.sender_jid=c.jid)
+order by jid`
+	return s.queryContacts(ctx, query, nil)
 }
 
 func (s *Store) allContacts(ctx context.Context) ([]Contact, error) {
@@ -94,6 +99,10 @@ func (s *Store) contacts(ctx context.Context, limit int) ([]Contact, error) {
 		query += " limit ?"
 		args = append(args, limit)
 	}
+	return s.queryContacts(ctx, query, args)
+}
+
+func (s *Store) queryContacts(ctx context.Context, query string, args []any) ([]Contact, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

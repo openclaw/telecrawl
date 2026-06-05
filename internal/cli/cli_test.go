@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -87,26 +88,39 @@ func TestContactsExportUsesContractShapeAndSkipsUnsafeNames(t *testing.T) {
 	}
 	defer func() { _ = st.Close() }()
 	contacts := make([]store.Contact, 0, 104)
-	for i := 0; i < 101; i++ {
-		contacts = append(contacts, store.Contact{
-			JID:      "safe-" + string(rune('a'+(i%26))) + "-" + string(rune('a'+((i/26)%26))),
-			Phone:    "+1555010" + strings.Repeat("0", 3-len(string(rune('0'+(i%10))))) + string(rune('0'+(i%10))),
-			FullName: "Safe Person",
+	messages := make([]store.Message, 0, 104)
+	addContact := func(contact store.Contact, withEvidence bool) {
+		contacts = append(contacts, contact)
+		if !withEvidence {
+			return
+		}
+		messages = append(messages, store.Message{
+			SourcePK:  int64(len(messages) + 1),
+			ChatJID:   contact.JID,
+			MessageID: fmt.Sprintf("msg-%d", len(messages)+1),
+			Timestamp: time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC),
+			Text:      "contact evidence",
 		})
 	}
-	contacts = append(
-		contacts,
-		store.Contact{JID: "first-last", Phone: "+15559990001", FirstName: "First", LastName: "Last"},
-		store.Contact{JID: "username-only", Phone: "+15559990002", Username: "handle", FullName: "@handle"},
-		store.Contact{JID: "bare-username-only", Phone: "+15559990006", Username: "handle", FullName: "Handle"},
-		store.Contact{JID: "phone-only", Phone: "+15559990003", FullName: "+15559990003"},
-		store.Contact{JID: "jid-only", Phone: "+15559990004", FullName: "jid-only"},
-		store.Contact{JID: "blank-name", Phone: "+15559990005"},
-		store.Contact{JID: "no-phone", FullName: "No Phone"},
-		store.Contact{JID: "short-phone-person", Phone: "12345", FullName: "Short Phone Person"},
-		store.Contact{JID: "telegram-service", Phone: "42777", FullName: "Telegram", FirstName: "Telegram"},
-	)
-	if err := st.ReplaceAll(ctx, store.ImportStats{}, contacts, nil, nil, nil, nil, nil); err != nil {
+	for i := 0; i < 101; i++ {
+		addContact(store.Contact{
+			JID:      "safe-" + string(rune('a'+(i%26))) + "-" + string(rune('a'+((i/26)%26))),
+			Phone:    fmt.Sprintf("+155501%05d", i),
+			FullName: "Safe Person",
+		}, true)
+	}
+	addContact(store.Contact{JID: "first-last", Phone: "+15559990001", FirstName: "First", LastName: "Last"}, true)
+	addContact(store.Contact{JID: "first-last-duplicate", Phone: "+15559990001", FirstName: "First", LastName: "Last"}, true)
+	addContact(store.Contact{JID: "username-only", Phone: "+15559990002", Username: "handle", FullName: "@handle"}, true)
+	addContact(store.Contact{JID: "bare-username-only", Phone: "+15559990006", Username: "handle", FullName: "Handle"}, true)
+	addContact(store.Contact{JID: "phone-only", Phone: "+15559990003", FullName: "+15559990003"}, true)
+	addContact(store.Contact{JID: "jid-only", Phone: "+15559990004", FullName: "jid-only"}, true)
+	addContact(store.Contact{JID: "blank-name", Phone: "+15559990005"}, true)
+	addContact(store.Contact{JID: "no-phone", FullName: "No Phone"}, true)
+	addContact(store.Contact{JID: "short-phone-person", Phone: "12345", FullName: "Short Phone Person"}, true)
+	addContact(store.Contact{JID: "telegram-service", Phone: "42777", FullName: "Telegram", FirstName: "Telegram"}, true)
+	addContact(store.Contact{JID: "stale-peer", Phone: "+15559990007", FullName: "Stale Peer"}, false)
+	if err := st.ReplaceAll(ctx, store.ImportStats{}, contacts, nil, nil, nil, nil, messages); err != nil {
 		t.Fatal(err)
 	}
 	var out, errOut bytes.Buffer
@@ -130,9 +144,13 @@ func TestContactsExportUsesContractShapeAndSkipsUnsafeNames(t *testing.T) {
 		t.Fatalf("contacts = %d, want 103", len(payload.Contacts))
 	}
 	var sawFirstLast, sawShortPhonePerson bool
+	firstLastCount := 0
 	for _, contact := range payload.Contacts {
 		if contact.DisplayName == "First Last" {
 			sawFirstLast = true
+			if contact.PhoneNumbers[0] == "+15559990001" {
+				firstLastCount++
+			}
 		}
 		if contact.DisplayName == "Short Phone Person" && contact.PhoneNumbers[0] == "12345" {
 			sawShortPhonePerson = true
@@ -149,9 +167,15 @@ func TestContactsExportUsesContractShapeAndSkipsUnsafeNames(t *testing.T) {
 		if contact.DisplayName == "Handle" || contact.PhoneNumbers[0] == "42777" {
 			t.Fatalf("unsafe contact exported: %#v", contact)
 		}
+		if contact.DisplayName == "Stale Peer" {
+			t.Fatalf("stale contact without conversation evidence exported: %#v", contact)
+		}
 	}
 	if !sawFirstLast {
 		t.Fatalf("missing composed first/last name: %#v", payload.Contacts)
+	}
+	if firstLastCount != 1 {
+		t.Fatalf("first/last duplicate count = %d, want 1", firstLastCount)
 	}
 	if !sawShortPhonePerson {
 		t.Fatalf("missing short phone person: %#v", payload.Contacts)
