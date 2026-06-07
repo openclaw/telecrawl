@@ -334,11 +334,27 @@ func fakePythonImporter(t *testing.T) (python string, argvPath string) {
 	argvPath = filepath.Join(dir, "argv")
 	python = filepath.Join(dir, "python")
 	result := `{"source_path":"fixture","started_at":"2026-01-01T00:00:00Z","finished_at":"2026-01-01T00:00:00Z","chats":[],"folders":[],"folder_chats":[],"topics":[],"messages":[]}`
-	body := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\nprintf '%%s\\n' '%s'\n", argvPath, result)
+	body := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--probe\" ]; then exit 0; fi\nprintf '%%s\\n' \"$@\" > %q\nprintf '%%s\\n' '%s'\n", argvPath, result)
 	if err := os.WriteFile(python, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	waitForFakePython(t, python)
 	return python, argvPath
+}
+
+func waitForFakePython(t *testing.T, python string) {
+	t.Helper()
+	for range 20 {
+		err := exec.Command(python, "--probe").Run() // #nosec G204 -- test executes its own temporary helper.
+		if err == nil {
+			return
+		}
+		if !strings.Contains(err.Error(), "text file busy") {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("fake python %s remained text file busy", python)
 }
 
 func readImporterArgs(t *testing.T, path string) []string {

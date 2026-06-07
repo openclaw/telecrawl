@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/openclaw/telecrawl/internal/backup"
 	"github.com/openclaw/telecrawl/internal/store"
@@ -466,6 +467,9 @@ func (r *runtime) runFolders(args []string) error {
 }
 
 func (r *runtime) runContacts(args []string) error {
+	if len(args) > 0 && args[0] == "export" {
+		return r.runContactsExport(args[1:])
+	}
 	fs := flag.NewFlagSet("telecrawl contacts", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	limit := fs.Int("limit", 100, "")
@@ -482,6 +486,135 @@ func (r *runtime) runContacts(args []string) error {
 		}
 		return r.print(contacts)
 	})
+}
+
+type contactExport struct {
+	Contacts []exportedContact `json:"contacts"`
+}
+
+type exportedContact struct {
+	DisplayName  string   `json:"display_name"`
+	PhoneNumbers []string `json:"phone_numbers"`
+}
+
+func (r *runtime) runContactsExport(args []string) error {
+	fs := flag.NewFlagSet("telecrawl contacts export", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() != 0 {
+		return usageErr(errors.New("contacts export takes no arguments"))
+	}
+	return r.withStore(func(st *store.Store) error {
+		contacts, err := st.ExportContacts(r.ctx)
+		if err != nil {
+			return err
+		}
+		return r.print(contactExport{Contacts: exportContacts(contacts)})
+	})
+}
+
+func exportContacts(contacts []store.Contact) []exportedContact {
+	out := make([]exportedContact, 0, len(contacts))
+	byPhone := map[string]store.Contact{}
+	phoneOrder := make([]string, 0, len(contacts))
+	for _, contact := range contacts {
+		if isTelegramServiceContact(contact) {
+			continue
+		}
+		name := contactDisplayName(contact)
+		phone := strings.TrimSpace(contact.Phone)
+		if name == "" || phone == "" {
+			continue
+		}
+		if current, ok := byPhone[phone]; ok {
+			if preferContactExportName(contact, current) {
+				byPhone[phone] = contact
+			}
+		} else {
+			byPhone[phone] = contact
+			phoneOrder = append(phoneOrder, phone)
+		}
+	}
+	for _, phone := range phoneOrder {
+		contact := byPhone[phone]
+		name := contactDisplayName(contact)
+		out = append(out, exportedContact{DisplayName: name, PhoneNumbers: []string{phone}})
+	}
+	return out
+}
+
+func preferContactExportName(candidate, current store.Contact) bool {
+	if candidate.UpdatedAt.After(current.UpdatedAt) {
+		return true
+	}
+	if current.UpdatedAt.After(candidate.UpdatedAt) {
+		return false
+	}
+	return len([]rune(contactDisplayName(candidate))) > len([]rune(contactDisplayName(current)))
+}
+
+func contactDisplayName(contact store.Contact) string {
+	if name := cleanContactName(contact.FullName, contact); name != "" {
+		return name
+	}
+	return cleanContactName(strings.TrimSpace(contact.FirstName+" "+contact.LastName), contact)
+}
+
+func cleanContactName(name string, contact store.Contact) string {
+	name = strings.TrimSpace(name)
+	switch {
+	case name == "":
+		return ""
+	case sameContactText(name, contact.Phone):
+		return ""
+	case sameContactText(name, contact.JID):
+		return ""
+	case sameContactText(name, contact.Username):
+		return ""
+	case sameContactText(name, contact.LID):
+		return ""
+	case strings.HasPrefix(name, "@"):
+		return ""
+	case looksLikePhone(name):
+		return ""
+	default:
+		return name
+	}
+}
+
+func sameContactText(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	return a != "" && b != "" && strings.EqualFold(a, b)
+}
+
+func isTelegramServiceContact(contact store.Contact) bool {
+	return strings.TrimSpace(contact.Phone) == "42777" &&
+		sameContactText(contact.FullName, "Telegram") &&
+		sameContactText(contact.FirstName, "Telegram") &&
+		strings.TrimSpace(contact.LastName) == "" &&
+		strings.TrimSpace(contact.Username) == ""
+}
+
+func looksLikePhone(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	digits := 0
+	other := 0
+	for _, r := range value {
+		switch {
+		case unicode.IsDigit(r):
+			digits++
+		case strings.ContainsRune(" +()-.", r):
+		default:
+			other++
+		}
+	}
+	return digits >= 5 && other == 0
 }
 
 func (r *runtime) runTopics(args []string) error {
@@ -810,6 +943,7 @@ usage:
   telecrawl [--json] status
   telecrawl [--json] folders
   telecrawl [--json] contacts [--limit N]
+  telecrawl [--json] contacts export
   telecrawl [--json] chats [--limit N] [--unread] [--folder ID]
   telecrawl [--json] topics --chat ID [--limit N]
   telecrawl [--json] messages [--chat ID] [--topic ID] [--limit N] [--after DATE]
