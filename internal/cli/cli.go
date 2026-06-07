@@ -53,7 +53,6 @@ type runtime struct {
 	json   bool
 	dbPath string
 	source string
-	python string
 }
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -66,7 +65,6 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	jsonOut := global.Bool("json", false, "")
 	dbPath := global.String("db", defaultDBPath(), "")
 	source := global.String("source", "", "")
-	python := global.String("python", "", "")
 	versionFlag := global.Bool("version", false, "")
 	if err := global.Parse(args); err != nil {
 		return usageErr(err)
@@ -84,14 +82,11 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		_, _ = io.WriteString(stdout, version+"\n")
 		return nil
 	}
-	r := &runtime{ctx: ctx, stdout: stdout, stderr: stderr, json: *jsonOut, dbPath: *dbPath, source: *source, python: *python}
+	r := &runtime{ctx: ctx, stdout: stdout, stderr: stderr, json: *jsonOut, dbPath: *dbPath, source: *source}
 	return r.dispatch(rest)
 }
 
 func (r *runtime) dispatch(args []string) error {
-	if strings.TrimSpace(r.python) != "" {
-		r.warnIgnoredPython()
-	}
 	switch args[0] {
 	case "metadata":
 		return r.print(controlManifest())
@@ -115,33 +110,11 @@ func (r *runtime) dispatch(args []string) error {
 		return r.runSearch(args[1:])
 	case "backup":
 		return r.runBackup(args[1:])
-	case "deps":
-		return r.runDeps(args[1:])
 	case "wiretap":
 		return r.runImport(args[1:])
 	default:
 		return usageErr(fmt.Errorf("unknown command %q", args[0]))
 	}
-}
-
-func (r *runtime) runDeps(args []string) error {
-	if len(args) == 0 || args[0] != "install" {
-		return usageErr(errors.New("usage: telecrawl deps install"))
-	}
-	fs := flag.NewFlagSet("telecrawl deps install", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args[1:]); err != nil {
-		return usageErr(err)
-	}
-	if fs.NArg() != 0 {
-		return usageErr(errors.New("usage: telecrawl deps install"))
-	}
-	r.warnDeprecatedDeps()
-	return r.print(map[string]any{
-		"deprecated": true,
-		"installed":  false,
-		"message":    "Telegram imports are built into telecrawl; no Python bridge dependencies are installed.",
-	})
 }
 
 func (r *runtime) withStore(fn func(*store.Store) error) error {
@@ -182,7 +155,6 @@ func (r *runtime) runImport(args []string) error {
 	fs := flag.NewFlagSet("telecrawl import", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	path := fs.String("path", r.source, "")
-	python := fs.String("python", "", "")
 	dialogsLimit := fs.Int("dialogs-limit", 200, "")
 	messagesLimit := fs.Int("messages-limit", 500, "")
 	chat := fs.String("chat", "", "")
@@ -192,9 +164,6 @@ func (r *runtime) runImport(args []string) error {
 	}
 	if fs.NArg() != 0 {
 		return usageErr(errors.New("import takes flags only"))
-	}
-	if strings.TrimSpace(*python) != "" {
-		r.warnIgnoredPython()
 	}
 	return r.withStore(func(st *store.Store) error {
 		var existingMediaSourcePath string
@@ -223,14 +192,6 @@ func (r *runtime) runImport(args []string) error {
 		}
 		return r.print(result.Stats)
 	})
-}
-
-func (r *runtime) warnIgnoredPython() {
-	_, _ = io.WriteString(r.stderr, "warning: --python is deprecated and ignored; Telegram imports are pure Go now\n")
-}
-
-func (r *runtime) warnDeprecatedDeps() {
-	_, _ = io.WriteString(r.stderr, "warning: telecrawl deps install is deprecated; no Python dependencies are required\n")
 }
 
 func storeImportResult(ctx context.Context, st *store.Store, result *telegramdesktop.ImportResult, chatFilter string) error {

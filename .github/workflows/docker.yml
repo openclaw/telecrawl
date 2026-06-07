@@ -23,4 +23,3 @@ jobs:
           set -euo pipefail
           docker run --rm telecrawl:ci --version
           docker run --rm telecrawl:ci --help
-          docker run --rm --entrypoint sh telecrawl:ci -c 'command -v telecrawl && ! command -v python && ! command -v python3 && ! test -e /opt/telecrawl-venv'

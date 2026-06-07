@@ -1,7 +1,3 @@
----
-written_by: ai
----
-
 # ✈️ telecrawl
 
 ![telecrawl banner](docs/assets/readme-banner.jpg)

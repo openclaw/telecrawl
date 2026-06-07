@@ -433,30 +433,6 @@ func TestUsageDocumentsMediaFetchOptIn(t *testing.T) {
 	}
 }
 
-func TestLegacyBridgeCommandsRemainCompatibleNoOps(t *testing.T) {
-	t.Parallel()
-	var out, errOut bytes.Buffer
-	err := Run(context.Background(), []string{"deps", "install"}, &out, &errOut)
-	if err != nil {
-		t.Fatalf("deps install error = %v exit=%d", err, ExitCode(err))
-	}
-	if !strings.Contains(out.String(), `"deprecated": true`) || !strings.Contains(out.String(), `"installed": false`) {
-		t.Fatalf("deps install output = %s", out.String())
-	}
-	if !strings.Contains(errOut.String(), "deprecated") || !strings.Contains(errOut.String(), "no Python dependencies") {
-		t.Fatalf("deps install stderr = %s", errOut.String())
-	}
-	out.Reset()
-	errOut.Reset()
-	err = Run(context.Background(), []string{"--python", "/tmp/nope", "status"}, &out, &errOut)
-	if err != nil {
-		t.Fatalf("--python error = %v exit=%d", err, ExitCode(err))
-	}
-	if !strings.Contains(errOut.String(), "--python is deprecated and ignored") {
-		t.Fatalf("--python stderr = %s", errOut.String())
-	}
-}
-
 func accountScopedImportResult(label string) telegramdesktop.ImportResult {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	return telegramdesktop.ImportResult{
