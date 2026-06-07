@@ -15,7 +15,7 @@ func TestReadSourceRecordsSQLCipherFixture(t *testing.T) {
 		AccountID: "stable/account-a",
 		DBPath:    filepath.Join("testdata", "sqlcipher_v4.db"),
 	}
-	records, err := ReadSourceRecords(context.Background(), source, keyAndSalt, false)
+	records, err := ReadSourceRecordsWithOptions(context.Background(), source, keyAndSalt, false, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestReadSourceRecordsOptionsMatchFullFixture(t *testing.T) {
 		AccountID: "stable/account-a",
 		DBPath:    filepath.Join("testdata", "sqlcipher_v4.db"),
 	}
-	full, err := ReadSourceRecords(context.Background(), source, keyAndSalt, false)
+	full, err := ReadSourceRecordsWithOptions(context.Background(), source, keyAndSalt, false, ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

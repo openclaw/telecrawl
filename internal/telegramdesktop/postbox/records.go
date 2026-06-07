@@ -82,10 +82,6 @@ type PeerRecord struct {
 	AvatarPath string
 }
 
-func ReadSourceRecords(ctx context.Context, source Source, keyAndSalt []byte, multiAccount bool) (Records, error) {
-	return ReadSourceRecordsWithOptions(ctx, source, keyAndSalt, multiAccount, ReadOptions{})
-}
-
 func ReadSourceRecordsWithOptions(ctx context.Context, source Source, keyAndSalt []byte, multiAccount bool, opts ReadOptions) (Records, error) {
 	db, cleanup, err := OpenDecryptedDB(ctx, source.DBPath, keyAndSalt)
 	if err != nil {
@@ -93,7 +89,7 @@ func ReadSourceRecordsWithOptions(ctx context.Context, source Source, keyAndSalt
 	}
 	defer cleanup()
 	defer func() { _ = db.Close() }()
-	return ReadSourceRecordsDBWithOptions(ctx, source, db, multiAccount, opts)
+	return readSourceRecordsDB(ctx, source, db, multiAccount, opts)
 }
 
 func OpenDecryptedDB(ctx context.Context, dbPath string, keyAndSalt []byte) (*sql.DB, func(), error) {
@@ -157,11 +153,7 @@ func disableSQLiteWALHeader(data []byte) {
 	}
 }
 
-func ReadSourceRecordsDB(ctx context.Context, source Source, db *sql.DB, multiAccount bool) (Records, error) {
-	return ReadSourceRecordsDBWithOptions(ctx, source, db, multiAccount, ReadOptions{})
-}
-
-func ReadSourceRecordsDBWithOptions(ctx context.Context, source Source, db *sql.DB, multiAccount bool, opts ReadOptions) (Records, error) {
+func readSourceRecordsDB(ctx context.Context, source Source, db *sql.DB, multiAccount bool, opts ReadOptions) (Records, error) {
 	mediaRoot := filepath.Join(filepath.Dir(filepath.Dir(source.DBPath)), "media")
 	rawPeerRecords, err := LoadPeerRecords(ctx, db, mediaRoot)
 	if err != nil {

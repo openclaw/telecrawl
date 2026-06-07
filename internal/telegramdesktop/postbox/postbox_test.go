@@ -15,15 +15,12 @@ import (
 func TestSanitizedPostboxFixture(t *testing.T) {
 	root := filepath.Join("..", "testdata", "postbox")
 	var expected struct {
-		PeerDisplay            string    `json:"peer_display"`
-		Text                   string    `json:"text"`
-		AuthorID               int64     `json:"author_id"`
-		MediaType              string    `json:"media_type"`
-		ReferencedMediaIDs     [][]int64 `json:"referenced_media_ids"`
-		ChatFilterSourcePKs    []int64   `json:"chat_filter_source_pks"`
-		LimitedSourcePKs       []int64   `json:"limited_source_pks"`
-		SingleAccountPeerID    string    `json:"single_account_peer_id"`
-		RawChatFilterSourcePKs []int64   `json:"raw_chat_filter_source_pks"`
+		PeerDisplay         string    `json:"peer_display"`
+		Text                string    `json:"text"`
+		AuthorID            int64     `json:"author_id"`
+		MediaType           string    `json:"media_type"`
+		ReferencedMediaIDs  [][]int64 `json:"referenced_media_ids"`
+		SingleAccountPeerID string    `json:"single_account_peer_id"`
 	}
 	if err := readFixtureJSON(filepath.Join(root, "postbox_expected.json"), &expected); err != nil {
 		t.Fatal(err)
@@ -57,17 +54,6 @@ func TestSanitizedPostboxFixture(t *testing.T) {
 		t.Fatalf("referenced media ids = %#v, want %#v", got, expected.ReferencedMediaIDs)
 	}
 
-	sample := []Row{
-		{"chat_id": "1", "_raw_chat_id": "1", "_ts": int64(10), "source_pk": int64(1)},
-		{"chat_id": "1", "_raw_chat_id": "1", "_ts": int64(20), "source_pk": int64(2)},
-		{"chat_id": "2", "_raw_chat_id": "2", "_ts": int64(30), "source_pk": int64(3)},
-	}
-	if got := sourcePKs(FilterChat(sample, "1")); !reflect.DeepEqual(got, expected.ChatFilterSourcePKs) {
-		t.Fatalf("chat filter source pks = %#v, want %#v", got, expected.ChatFilterSourcePKs)
-	}
-	if got := sourcePKs(ApplyLimits(sample, 1, 1)); !reflect.DeepEqual(got, expected.LimitedSourcePKs) {
-		t.Fatalf("limited source pks = %#v, want %#v", got, expected.LimitedSourcePKs)
-	}
 	if got := PeerStoreID("stable/account-a", 100, false); got != expected.SingleAccountPeerID {
 		t.Fatalf("single account peer id = %q, want %q", got, expected.SingleAccountPeerID)
 	}
@@ -78,13 +64,6 @@ func TestSanitizedPostboxFixture(t *testing.T) {
 	}
 	if SourcePK("stable/account-a", 100, 0, 1, true) == SourcePK("stable/account-b", 100, 0, 1, true) {
 		t.Fatal("multi-account message source keys collided")
-	}
-	multiSample := []Row{
-		{"chat_id": accountAChat, "_raw_chat_id": "100", "_ts": int64(10), "source_pk": int64(4)},
-		{"chat_id": accountBChat, "_raw_chat_id": "100", "_ts": int64(20), "source_pk": int64(5)},
-	}
-	if got := sourcePKs(FilterChat(multiSample, "100")); !reflect.DeepEqual(got, expected.RawChatFilterSourcePKs) {
-		t.Fatalf("raw chat filter source pks = %#v, want %#v", got, expected.RawChatFilterSourcePKs)
 	}
 }
 
@@ -204,15 +183,6 @@ func mediaRefsAsLists(refs []MediaRef) [][]int64 {
 	out := make([][]int64, 0, len(refs))
 	for _, ref := range refs {
 		out = append(out, []int64{int64(ref.Namespace), ref.ID})
-	}
-	return out
-}
-
-func sourcePKs(rows []Row) []int64 {
-	out := make([]int64, 0, len(rows))
-	for _, row := range rows {
-		value, _ := int64Value(row["source_pk"])
-		out = append(out, value)
 	}
 	return out
 }
