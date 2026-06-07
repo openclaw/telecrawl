@@ -228,6 +228,113 @@ pragma user_version = 2;
 	}
 }
 
+func TestOpenMigratesSchema1BeforeCreatingTopicIndex(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "schema1.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+create table chats (
+	id integer primary key,
+	kind text not null,
+	name text,
+	username text,
+	last_message_at integer,
+	unread_count integer not null default 0,
+	message_count integer not null default 0
+);
+create table contacts (
+	jid text primary key,
+	phone text,
+	full_name text,
+	first_name text,
+	last_name text,
+	business_name text,
+	username text,
+	lid text,
+	about_text text,
+	updated_at integer
+);
+create table messages (
+	rowid integer primary key autoincrement,
+	source_pk integer not null unique,
+	chat_jid text not null,
+	chat_name text,
+	msg_id text not null,
+	sender_jid text,
+	sender_name text,
+	ts integer not null,
+	from_me integer not null,
+	text text,
+	raw_type integer not null default 0,
+	message_type text,
+	media_type text,
+	media_title text,
+	media_path text,
+	media_url text,
+	media_size integer,
+	starred integer not null default 0
+);
+create index idx_messages_chat_ts on messages(chat_jid, ts);
+pragma user_version = 1;
+`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st := openTestStore(t, path)
+	cols, err := columns(ctx, st.db, "messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cols["topic_id"] {
+		t.Fatal("missing migrated topic_id column")
+	}
+	var indexName string
+	if err := st.db.QueryRowContext(ctx, `select name from sqlite_master where type='index' and name='idx_messages_chat_topic_ts'`).Scan(&indexName); err != nil {
+		t.Fatal(err)
+	}
+	if indexName != "idx_messages_chat_topic_ts" {
+		t.Fatalf("topic index = %q", indexName)
+	}
+	var version int
+	if err := st.db.QueryRowContext(ctx, "pragma user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", version, schemaVersion)
+	}
+}
+
+func TestMessagesToleratesNullableOptionalFields(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st := openTestStore(t, filepath.Join(t.TempDir(), "nullable-messages.db"))
+	if _, err := st.db.ExecContext(ctx, `insert into messages(source_pk,chat_jid,msg_id,ts,from_me,raw_type,starred) values(?,?,?,?,?,?,?)`, 1, "42", "1", unix(time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)), 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, err := st.Messages(ctx, MessageFilter{ChatJID: "42", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(messages))
+	}
+	if messages[0].EditTime.IsZero() == false {
+		t.Fatalf("edit time = %v, want zero", messages[0].EditTime)
+	}
+	if messages[0].ChatName != "" || messages[0].TopicID != "" || messages[0].ForwardJSON != "" {
+		t.Fatalf("nullable fields not normalized: %#v", messages[0])
+	}
+}
+
 func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

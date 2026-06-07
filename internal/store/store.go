@@ -203,6 +203,10 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if _, err := db.ExecContext(ctx, indexSQL); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if _, err := db.ExecContext(ctx, fmt.Sprintf("pragma user_version = %d", schemaVersion)); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -525,11 +529,11 @@ func (s *Store) messages(ctx context.Context, filter MessageFilter, search bool)
 	if filter.Limit <= 0 {
 		filter.Limit = 50
 	}
-	query := `select source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,edit_ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,coalesce(metadata_type,''),coalesce(metadata_title,''),coalesce(metadata_url,''),coalesce(metadata_json,''),starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,forward_json,reactions_json,views,forwards,replies_count,pinned,'' from messages where 1=1`
+	query := `select source_pk,chat_jid,coalesce(chat_name,''),msg_id,coalesce(sender_jid,''),coalesce(sender_name,''),ts,coalesce(edit_ts,0),from_me,coalesce(text,''),raw_type,coalesce(message_type,''),coalesce(media_type,''),coalesce(media_title,''),coalesce(media_path,''),coalesce(media_url,''),coalesce(media_size,0),coalesce(metadata_type,''),coalesce(metadata_title,''),coalesce(metadata_url,''),coalesce(metadata_json,''),starred,coalesce(topic_id,''),coalesce(reply_to_msg_id,''),coalesce(reply_to_chat_jid,''),coalesce(thread_id,''),coalesce(forward_json,''),coalesce(reactions_json,''),coalesce(views,0),coalesce(forwards,0),coalesce(replies_count,0),coalesce(pinned,0),'' from messages where 1=1`
 	args := []any{}
 	prefix := ""
 	if search {
-		query = `select m.source_pk,m.chat_jid,m.chat_name,m.msg_id,m.sender_jid,m.sender_name,m.ts,m.edit_ts,m.from_me,m.text,m.raw_type,m.message_type,m.media_type,m.media_title,m.media_path,m.media_url,m.media_size,coalesce(m.metadata_type,''),coalesce(m.metadata_title,''),coalesce(m.metadata_url,''),coalesce(m.metadata_json,''),m.starred,m.topic_id,m.reply_to_msg_id,m.reply_to_chat_jid,m.thread_id,m.forward_json,m.reactions_json,m.views,m.forwards,m.replies_count,m.pinned,snippet(messages_fts,0,'[',']','...',12) from messages_fts f join messages m on m.rowid=f.rowid where messages_fts match ?`
+		query = `select m.source_pk,m.chat_jid,coalesce(m.chat_name,''),m.msg_id,coalesce(m.sender_jid,''),coalesce(m.sender_name,''),m.ts,coalesce(m.edit_ts,0),m.from_me,coalesce(m.text,''),m.raw_type,coalesce(m.message_type,''),coalesce(m.media_type,''),coalesce(m.media_title,''),coalesce(m.media_path,''),coalesce(m.media_url,''),coalesce(m.media_size,0),coalesce(m.metadata_type,''),coalesce(m.metadata_title,''),coalesce(m.metadata_url,''),coalesce(m.metadata_json,''),m.starred,coalesce(m.topic_id,''),coalesce(m.reply_to_msg_id,''),coalesce(m.reply_to_chat_jid,''),coalesce(m.thread_id,''),coalesce(m.forward_json,''),coalesce(m.reactions_json,''),coalesce(m.views,0),coalesce(m.forwards,0),coalesce(m.replies_count,0),coalesce(m.pinned,0),snippet(messages_fts,0,'[',']','...',12) from messages_fts f join messages m on m.rowid=f.rowid where messages_fts match ?`
 		args = append(args, filter.Query)
 		prefix = "m."
 	}

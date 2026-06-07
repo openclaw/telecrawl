@@ -113,6 +113,14 @@ create table if not exists messages (
 	pinned integer not null default 0
 );
 
+create table if not exists sync_state (
+	key text primary key,
+	value text not null,
+	updated_at integer not null
+);
+`
+
+const indexSQL = `
 create index if not exists idx_messages_chat_ts on messages(chat_jid, ts);
 create index if not exists idx_messages_chat_msg on messages(chat_jid, msg_id);
 create index if not exists idx_messages_chat_topic_ts on messages(chat_jid, topic_id, ts);
@@ -122,10 +130,4 @@ create index if not exists idx_messages_ts on messages(ts);
 create index if not exists idx_messages_sender on messages(sender_jid);
 
 create virtual table if not exists messages_fts using fts5(text, chat, sender, media);
-
-create table if not exists sync_state (
-	key text primary key,
-	value text not null,
-	updated_at integer not null
-);
 `

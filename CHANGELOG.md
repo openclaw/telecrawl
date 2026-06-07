@@ -5,6 +5,11 @@
 ### Added
 
 - Archive Telegram contact records from local Postbox imports. (#7; thanks @joshp123)
+- Expose Telegram contacts through the crawlkit `contact-export` metadata command for Clawdex imports. (#9; thanks @joshp123)
+
+### Fixed
+
+- Migrate older local archives before creating topic indexes and tolerate nullable optional message fields from live Telegram data.
 
 ## [0.2.0] - 2026-05-31
 
