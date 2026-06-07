@@ -16,20 +16,6 @@ import (
 	"github.com/openclaw/telecrawl/internal/telegramdesktop"
 )
 
-func TestDepsInstallPackagesKeepTDataPathIndependent(t *testing.T) {
-	got := depsInstallPackages()
-	want := []string{"opentele2", "telethon>=1.43.2"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("deps = %v, want %v", got, want)
-	}
-	if slices.Contains(got, "pycryptodomex") || slices.Contains(got, "sqlcipher3") {
-		t.Fatalf("tdata deps should not require Postbox packages: %v", got)
-	}
-	if want := []string{"pycryptodomex", "sqlcipher3", "telethon>=1.43.2"}; !slices.Equal(postboxDepsInstallPackages(), want) {
-		t.Fatalf("postbox deps = %v, want %v", postboxDepsInstallPackages(), want)
-	}
-}
-
 func TestStoreImportResultUpsertsReturnedAccountScopedChats(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "telecrawl.db"))
@@ -444,6 +430,30 @@ func TestUsageDocumentsMediaFetchOptIn(t *testing.T) {
 	printUsage(&out)
 	if !strings.Contains(out.String(), "--fetch-media") {
 		t.Fatalf("usage should document media fetch opt-in:\n%s", out.String())
+	}
+}
+
+func TestLegacyBridgeCommandsRemainCompatibleNoOps(t *testing.T) {
+	t.Parallel()
+	var out, errOut bytes.Buffer
+	err := Run(context.Background(), []string{"deps", "install"}, &out, &errOut)
+	if err != nil {
+		t.Fatalf("deps install error = %v exit=%d", err, ExitCode(err))
+	}
+	if !strings.Contains(out.String(), `"deprecated": true`) || !strings.Contains(out.String(), `"installed": false`) {
+		t.Fatalf("deps install output = %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "deprecated") || !strings.Contains(errOut.String(), "no Python dependencies") {
+		t.Fatalf("deps install stderr = %s", errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	err = Run(context.Background(), []string{"--python", "/tmp/nope", "status"}, &out, &errOut)
+	if err != nil {
+		t.Fatalf("--python error = %v exit=%d", err, ExitCode(err))
+	}
+	if !strings.Contains(errOut.String(), "--python is deprecated and ignored") {
+		t.Fatalf("--python stderr = %s", errOut.String())
 	}
 }
 

@@ -1,3 +1,15 @@
+---
+written_by: ai
+---
+
+# Postbox Decoder Notice
+
+Portions of the native macOS Postbox decoder were ported from
+`telegram-message-exporter`, Copyright (c) 2026 Simon Oakes, MIT licensed.
+
+The upstream MIT license notice follows:
+
+```text
 MIT License
 
 Copyright (c) 2026 Simon Oakes
@@ -19,3 +31,4 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```

@@ -1,3 +1,7 @@
+---
+written_by: ai
+---
+
 # ✈️ telecrawl
 
 ![telecrawl banner](docs/assets/readme-banner.jpg)
@@ -38,22 +42,12 @@ docker run --rm -v "$HOME/.telecrawl:/data" -v "$HOME/Library/Application Suppor
 docker run --rm -v "$HOME/.telecrawl:/data" -v "$HOME/Library/Application Support/Telegram Desktop/tdata:/tdata:ro" telecrawl --source /tdata import
 ```
 
-The image packages the Python bridge dependencies. Mount Telegram Desktop `tdata` read-only and keep the archive/config under `/data`.
+Mount Telegram Desktop `tdata` read-only and keep the archive/config under `/data`.
 
 ## Setup
 
-Install the Python bridge dependencies used for local Telegram imports:
-
-```bash
-telecrawl deps install
-```
-
-This creates `~/.telecrawl/venv` and installs the bridge packages for Telegram
-Desktop `tdata`. It also attempts the optional native macOS Postbox SQLCipher
-binding when the host has the required native SQLCipher support. Native Postbox
-cloud-media fetches require Telethon `1.43.2` or newer for current Telegram TL
-types. The Docker image packages both the Python bridge and native SQLCipher
-dependencies.
+No language runtime setup is required. `telecrawl` imports Telegram Desktop
+`tdata` and native macOS Postbox data through the Go binary.
 
 ## Import
 
@@ -133,9 +127,10 @@ telecrawl search "query" --chat CHAT_ID --topic TOPIC_ID
 
 Telegram folders, forum topics, reply/thread IDs, pinned messages, edits,
 forwards, reactions, view/reply counts, and richer media titles are archived
-when Telethon exposes them for the active account. Folder rows include explicit
-membership from Telegram dialog filters; dynamic folder rules are recorded as
-metadata and may not expand to every matching chat.
+when the local source or Telegram API exposes them for the active account.
+Folder rows include explicit membership from Telegram dialog filters; dynamic
+folder rules are recorded as metadata and may not expand to every matching
+chat.
 
 Add `--json` before the command for machine-readable output:
 
@@ -154,8 +149,6 @@ Defaults:
 - archive DB: `~/.telecrawl/telecrawl.db`
 - archived media copied from local Telegram caches, plus Telegram cloud media
   when `--fetch-media` is used: `~/.telecrawl/media/`
-- Python bridge venv: `~/.telecrawl/venv`
-- Telethon sessions: `~/.telecrawl/sessions/`
 - backup config: `~/.telecrawl/backup.json`
 - age identity: `~/.telecrawl/age.key`
 - backup checkout: `~/Projects/backup-telecrawl`

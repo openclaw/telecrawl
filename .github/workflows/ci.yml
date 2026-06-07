@@ -128,7 +128,7 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --snapshot --clean --skip=publish
+          args: release --snapshot --clean --skip=publish --parallelism=2
 
   secrets:
     runs-on: ubuntu-latest
