@@ -16,20 +16,6 @@ import (
 	"github.com/openclaw/telecrawl/internal/telegramdesktop"
 )
 
-func TestDepsInstallPackagesKeepTDataPathIndependent(t *testing.T) {
-	got := depsInstallPackages()
-	want := []string{"opentele2", "telethon>=1.43.2"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("deps = %v, want %v", got, want)
-	}
-	if slices.Contains(got, "pycryptodomex") || slices.Contains(got, "sqlcipher3") {
-		t.Fatalf("tdata deps should not require Postbox packages: %v", got)
-	}
-	if want := []string{"pycryptodomex", "sqlcipher3", "telethon>=1.43.2"}; !slices.Equal(postboxDepsInstallPackages(), want) {
-		t.Fatalf("postbox deps = %v, want %v", postboxDepsInstallPackages(), want)
-	}
-}
-
 func TestStoreImportResultUpsertsReturnedAccountScopedChats(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "telecrawl.db"))

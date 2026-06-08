@@ -23,5 +23,3 @@ jobs:
           set -euo pipefail
           docker run --rm telecrawl:ci --version
           docker run --rm telecrawl:ci --help
-          docker run --rm --entrypoint python telecrawl:ci -c 'import opentele2, telethon'
-          docker run --rm --entrypoint python telecrawl:ci -c 'import importlib.metadata as m; v=tuple(map(int, m.version("telethon").split(".")[:3])); assert v >= (1, 43, 2), v'

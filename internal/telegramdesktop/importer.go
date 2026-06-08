@@ -1,33 +1,24 @@
 package telegramdesktop
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
-	_ "embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/openclaw/telecrawl/internal/store"
+	postboxpkg "github.com/openclaw/telecrawl/internal/telegramdesktop/postbox"
 )
-
-//go:embed scripts/import_tdata.py
-var importScript string
-
-//go:embed scripts/import_postbox.py
-var importPostboxScript string
 
 type ImportOptions struct {
 	Path                    string
-	Python                  string
-	Session                 string
 	DialogsLimit            int
 	MessagesLimit           int
 	ChatID                  string
@@ -54,144 +45,22 @@ type ImportResult struct {
 	Messages    []store.Message
 }
 
-type pyResult struct {
-	SourcePath  string `json:"source_path"`
-	StartedAt   string `json:"started_at"`
-	FinishedAt  string `json:"finished_at"`
-	RemoteMedia struct {
-		Candidates  int `json:"candidates"`
-		Attempted   int `json:"attempted"`
-		Downloaded  int `json:"downloaded"`
-		Missing     int `json:"missing"`
-		Unavailable int `json:"unavailable"`
-		Timeouts    int `json:"timeouts"`
-		Errors      int `json:"errors"`
-	} `json:"remote_media"`
-	Chats []struct {
-		ID            string `json:"id"`
-		Kind          string `json:"kind"`
-		Name          string `json:"name"`
-		Username      string `json:"username"`
-		LastMessageAt string `json:"last_message_at"`
-		UnreadCount   int    `json:"unread_count"`
-		MessageCount  int    `json:"message_count"`
-		FolderID      string `json:"folder_id"`
-		Forum         bool   `json:"forum"`
-	} `json:"chats"`
-	Contacts []struct {
-		ID           string `json:"id"`
-		PeerType     string `json:"peer_type"`
-		Phone        string `json:"phone"`
-		FullName     string `json:"full_name"`
-		FirstName    string `json:"first_name"`
-		LastName     string `json:"last_name"`
-		BusinessName string `json:"business_name"`
-		Username     string `json:"username"`
-		LID          string `json:"lid"`
-		AboutText    string `json:"about_text"`
-		AvatarPath   string `json:"avatar_path"`
-		UpdatedAt    string `json:"updated_at"`
-	} `json:"contacts"`
-	Folders []struct {
-		ID        string `json:"id"`
-		Title     string `json:"title"`
-		Emoticon  string `json:"emoticon"`
-		Color     int    `json:"color"`
-		FlagsJSON string `json:"flags_json"`
-	} `json:"folders"`
-	FolderChats []struct {
-		FolderID string `json:"folder_id"`
-		ChatID   string `json:"chat_id"`
-		Position int    `json:"position"`
-	} `json:"folder_chats"`
-	Topics []struct {
-		ChatID               string `json:"chat_id"`
-		TopicID              string `json:"topic_id"`
-		Title                string `json:"title"`
-		TopMessageID         string `json:"top_message_id"`
-		IconColor            int    `json:"icon_color"`
-		IconEmojiID          string `json:"icon_emoji_id"`
-		UnreadCount          int    `json:"unread_count"`
-		UnreadMentionsCount  int    `json:"unread_mentions_count"`
-		UnreadReactionsCount int    `json:"unread_reactions_count"`
-		Pinned               bool   `json:"pinned"`
-		Closed               bool   `json:"closed"`
-		Hidden               bool   `json:"hidden"`
-		LastMessageAt        string `json:"last_message_at"`
-	} `json:"topics"`
-	Messages []struct {
-		SourcePK         int64  `json:"source_pk"`
-		ChatID           string `json:"chat_id"`
-		ChatName         string `json:"chat_name"`
-		MessageID        string `json:"message_id"`
-		TopicID          string `json:"topic_id"`
-		ReplyToMessageID string `json:"reply_to_message_id"`
-		ThreadID         string `json:"thread_id"`
-		ReplyToChatID    string `json:"reply_to_chat_id"`
-		SenderID         string `json:"sender_id"`
-		SenderName       string `json:"sender_name"`
-		Timestamp        string `json:"timestamp"`
-		EditTimestamp    string `json:"edit_timestamp"`
-		FromMe           bool   `json:"from_me"`
-		Text             string `json:"text"`
-		MessageType      string `json:"message_type"`
-		MediaType        string `json:"media_type"`
-		MediaTitle       string `json:"media_title"`
-		MediaPath        string `json:"media_path"`
-		MediaSize        int64  `json:"media_size"`
-		MetadataType     string `json:"metadata_type"`
-		MetadataTitle    string `json:"metadata_title"`
-		MetadataURL      string `json:"metadata_url"`
-		MetadataJSON     string `json:"metadata_json"`
-		Views            int    `json:"views"`
-		Forwards         int    `json:"forwards"`
-		RepliesCount     int    `json:"replies_count"`
-		Pinned           bool   `json:"pinned"`
-		ForwardJSON      string `json:"forward_json"`
-		ReactionsJSON    string `json:"reactions_json"`
-	} `json:"messages"`
-}
-
 func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResult, error) {
-	python, err := resolvePython(opts.Python)
-	if err != nil {
-		return ImportResult{}, err
-	}
 	source := resolveImportSource(strings.TrimSpace(opts.Path))
+	var mediaTempDir string
+	if opts.FetchMedia {
+		var err error
+		mediaTempDir, err = os.MkdirTemp("", "telecrawl-telegram-media-*")
+		if err != nil {
+			return ImportResult{}, err
+		}
+		defer func() { _ = os.RemoveAll(mediaTempDir) }()
+	}
 	if source.postbox {
-		args := []string{
-			"--source", source.path,
-			"--dialogs-limit", fmt.Sprint(opts.DialogsLimit),
-			"--messages-limit", fmt.Sprint(opts.MessagesLimit),
-		}
-		if opts.FetchMedia {
-			mediaTempDir, err := os.MkdirTemp("", "telecrawl-postbox-media-*")
-			if err != nil {
-				return ImportResult{}, err
-			}
-			defer func() { _ = os.RemoveAll(mediaTempDir) }()
-			args = append(args, "--fetch-media", "--media-output-dir", mediaTempDir)
-		}
-		existingRefsPath, cleanupExistingRefs, err := writeExistingMediaRefs(opts, source.path)
+		result, err := importPostboxGo(ctx, source.path, opts, dbPath, mediaTempDir)
 		if err != nil {
 			return ImportResult{}, err
 		}
-		defer cleanupExistingRefs()
-		if existingRefsPath != "" {
-			args = append(args, "--existing-media-refs", existingRefsPath)
-		}
-		if opts.ChatID != "" {
-			args = append(args, "--chat", opts.ChatID)
-		}
-		deps := "pycryptodomex sqlcipher3"
-		if opts.FetchMedia {
-			deps += " telethon>=1.43.2"
-		}
-		raw, err := runPythonImporter(ctx, python, "import_postbox.py", importPostboxScript, args, deps)
-		if err != nil {
-			return ImportResult{}, err
-		}
-		result := decodeImportResult(raw, dbPath)
 		archiveDir := mediaArchiveDir(dbPath)
 		if err := copyImportedContactAvatars(result.Contacts, archiveDir); err != nil {
 			return ImportResult{}, err
@@ -202,43 +71,10 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 		return result, nil
 	}
 
-	session := strings.TrimSpace(opts.Session)
-	if session == "" {
-		session = defaultSessionPath(dbPath)
-	}
-	if err := os.MkdirAll(filepath.Dir(session), 0o700); err != nil {
-		return ImportResult{}, err
-	}
-	args := []string{
-		"--tdata", source.path,
-		"--session", session,
-		"--dialogs-limit", fmt.Sprint(opts.DialogsLimit),
-		"--messages-limit", fmt.Sprint(opts.MessagesLimit),
-	}
-	if opts.FetchMedia {
-		mediaTempDir, err := os.MkdirTemp("", "telecrawl-tdata-media-*")
-		if err != nil {
-			return ImportResult{}, err
-		}
-		defer func() { _ = os.RemoveAll(mediaTempDir) }()
-		args = append(args, "--fetch-media", "--media-output-dir", mediaTempDir)
-	}
-	existingRefsPath, cleanupExistingRefs, err := writeExistingMediaRefs(opts, source.path)
+	result, err := importTDataGo(ctx, source.path, opts, dbPath, mediaTempDir)
 	if err != nil {
 		return ImportResult{}, err
 	}
-	defer cleanupExistingRefs()
-	if existingRefsPath != "" {
-		args = append(args, "--existing-media-refs", existingRefsPath)
-	}
-	if opts.ChatID != "" {
-		args = append(args, "--chat", opts.ChatID)
-	}
-	raw, err := runPythonImporter(ctx, python, "import_tdata.py", importScript, args, "opentele2 telethon>=1.43.2")
-	if err != nil {
-		return ImportResult{}, err
-	}
-	result := decodeImportResult(raw, dbPath)
 	archiveDir := mediaArchiveDir(dbPath)
 	if err := copyImportedContactAvatars(result.Contacts, archiveDir); err != nil {
 		return ImportResult{}, err
@@ -247,6 +83,443 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 		return ImportResult{}, err
 	}
 	return result, nil
+}
+
+func importPostboxGo(ctx context.Context, sourcePath string, opts ImportOptions, dbPath, mediaTempDir string) (ImportResult, error) {
+	started := time.Now().UTC()
+	sources, err := postboxpkg.DiscoverSources(sourcePath)
+	if err != nil {
+		return ImportResult{}, err
+	}
+	if len(sources) == 0 {
+		return ImportResult{}, errors.New("no Telegram for macOS Postbox account databases found")
+	}
+	multiAccount := len(sources) > 1
+	allPeers := make(map[string]string)
+	allContacts := make(map[string]store.Contact)
+	byIdentity := make(map[string]postboxpkg.MessageRecord)
+	for _, source := range sources {
+		key, err := postboxpkg.ReadTempKey(source.KeyPath, postboxpkg.DefaultPasscodes)
+		if err != nil {
+			return ImportResult{}, fmt.Errorf("read postbox tempkey %s: %w", source.KeyPath, err)
+		}
+		records, err := postboxpkg.ReadSourceRecordsWithOptions(ctx, source, key, multiAccount, postboxpkg.ReadOptions{
+			DialogsLimit:  opts.DialogsLimit,
+			MessagesLimit: opts.MessagesLimit,
+			ChatID:        opts.ChatID,
+		})
+		if err != nil {
+			return ImportResult{}, fmt.Errorf("read postbox records %s: %w", source.DBPath, err)
+		}
+		for id, display := range records.Peers {
+			allPeers[id] = display
+		}
+		for _, contact := range records.Contacts {
+			allContacts[contact.ID] = store.Contact{
+				JID:          contact.ID,
+				PeerType:     contact.PeerType,
+				Phone:        contact.Phone,
+				FullName:     contact.FullName,
+				FirstName:    contact.FirstName,
+				LastName:     contact.LastName,
+				BusinessName: contact.BusinessName,
+				Username:     contact.Username,
+				LID:          contact.LID,
+				AboutText:    contact.AboutText,
+				AvatarPath:   contact.AvatarPath,
+				UpdatedAt:    parseTime(contact.UpdatedAt),
+			}
+		}
+		for _, msg := range records.Messages {
+			byIdentity[postboxMessageIdentity(msg)] = msg
+		}
+	}
+	messages := make([]postboxpkg.MessageRecord, 0, len(byIdentity))
+	for _, msg := range byIdentity {
+		messages = append(messages, msg)
+	}
+	messages = filterPostboxChat(messages, opts.ChatID)
+	if opts.ChatID != "" && len(messages) == 0 {
+		return ImportResult{}, fmt.Errorf("could not find chat in Postbox cache: %s", opts.ChatID)
+	}
+	messages = applyPostboxLimits(messages, opts.DialogsLimit, opts.MessagesLimit)
+	sharePostboxDuplicateMedia(messages)
+	sharePostboxResourceMedia(messages)
+	if applyPostboxExistingMediaRefs(messages, opts, sourcePath) > 0 {
+		sharePostboxDuplicateMedia(messages)
+		sharePostboxResourceMedia(messages)
+	}
+	remoteMedia := postboxRemoteMediaStats{Downloaded: 0, Missing: 0}
+	if opts.FetchMedia {
+		remoteMedia = downloadPostboxRemoteMedia(ctx, messages, sources, mediaTempDir)
+	}
+	sharePostboxDuplicateMedia(messages)
+	sharePostboxResourceMedia(messages)
+	cleared := clearPostboxPlaceholderMedia(messages)
+	_ = cleared
+	postboxpkg.AttachMessageMetadata(messages)
+
+	contacts := make([]store.Contact, 0, len(allContacts))
+	if opts.ChatID != "" {
+		contacts = filterPostboxContactsForMessages(allContacts, messages)
+	} else {
+		for _, contact := range allContacts {
+			contacts = append(contacts, contact)
+		}
+	}
+	sort.Slice(contacts, func(i, j int) bool {
+		return contacts[i].JID < contacts[j].JID
+	})
+
+	result := ImportResult{Contacts: contacts}
+	chats := make(map[string]*store.Chat)
+	for _, msg := range messages {
+		if msg.MediaType != "" {
+			result.Stats.MediaMessages++
+		}
+		result.Messages = append(result.Messages, store.Message{
+			SourcePK:      msg.SourcePK,
+			ChatJID:       msg.ChatID,
+			ChatName:      msg.ChatName,
+			MessageID:     msg.MessageID,
+			SenderJID:     msg.SenderID,
+			SenderName:    msg.SenderName,
+			Timestamp:     parseTime(msg.Timestamp),
+			FromMe:        msg.FromMe,
+			Text:          msg.Text,
+			MessageType:   msg.MessageType,
+			MediaType:     msg.MediaType,
+			MediaTitle:    msg.MediaTitle,
+			MediaPath:     msg.MediaPath,
+			MediaSize:     msg.MediaSize,
+			MetadataType:  msg.MetadataType,
+			MetadataTitle: msg.MetadataTitle,
+			MetadataURL:   msg.MetadataURL,
+			MetadataJSON:  msg.MetadataJSON,
+		})
+		chat := chats[msg.ChatID]
+		if chat == nil {
+			chat = &store.Chat{
+				JID:           msg.ChatID,
+				Kind:          "chat",
+				Name:          firstNonEmpty(msg.ChatName, allPeers[msg.ChatID]),
+				LastMessageAt: parseTime(msg.Timestamp),
+			}
+			chats[msg.ChatID] = chat
+		}
+		chat.MessageCount++
+		if ts := parseTime(msg.Timestamp); ts.After(chat.LastMessageAt) {
+			chat.LastMessageAt = ts
+		}
+	}
+	for _, chat := range chats {
+		result.Chats = append(result.Chats, *chat)
+	}
+	sort.Slice(result.Chats, func(i, j int) bool {
+		return result.Chats[i].LastMessageAt.After(result.Chats[j].LastMessageAt)
+	})
+	finished := time.Now().UTC()
+	result.Stats.SourcePath = sourcePath
+	result.Stats.DBPath = dbPath
+	result.Stats.Chats = len(result.Chats)
+	result.Stats.Messages = len(result.Messages)
+	result.Stats.RemoteMediaCandidates = remoteMedia.Candidates
+	result.Stats.RemoteMediaAttempted = remoteMedia.Attempted
+	result.Stats.RemoteMediaDownloads = remoteMedia.Downloaded
+	result.Stats.RemoteMediaMissing = remoteMedia.Missing
+	result.Stats.RemoteMediaUnavailable = remoteMedia.Unavailable
+	result.Stats.RemoteMediaTimeouts = remoteMedia.Timeouts
+	result.Stats.RemoteMediaErrors = remoteMedia.Errors
+	result.Stats.StartedAt = started
+	result.Stats.FinishedAt = finished
+	return result, nil
+}
+
+func postboxMessageIdentity(msg postboxpkg.MessageRecord) string {
+	return strings.Join([]string{msg.AccountID, msg.ChatID, msg.MessageID}, "\x00")
+}
+
+func filterPostboxChat(messages []postboxpkg.MessageRecord, chatID string) []postboxpkg.MessageRecord {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return messages
+	}
+	out := make([]postboxpkg.MessageRecord, 0, len(messages))
+	for _, msg := range messages {
+		if msg.ChatID == chatID || strconv.FormatInt(msg.RawChatID, 10) == chatID {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
+func applyPostboxLimits(messages []postboxpkg.MessageRecord, dialogsLimit, messagesLimit int) []postboxpkg.MessageRecord {
+	byChat := make(map[string][]postboxpkg.MessageRecord)
+	for _, msg := range messages {
+		byChat[msg.ChatID] = append(byChat[msg.ChatID], msg)
+	}
+	type rankedChat struct {
+		chatID string
+		rows   []postboxpkg.MessageRecord
+		maxTS  int64
+	}
+	ranked := make([]rankedChat, 0, len(byChat))
+	for chatID, rows := range byChat {
+		var maxTS int64
+		for _, row := range rows {
+			if row.TS > maxTS {
+				maxTS = row.TS
+			}
+		}
+		ranked = append(ranked, rankedChat{chatID: chatID, rows: rows, maxTS: maxTS})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].maxTS == ranked[j].maxTS {
+			return ranked[i].chatID < ranked[j].chatID
+		}
+		return ranked[i].maxTS > ranked[j].maxTS
+	})
+	if dialogsLimit > 0 && dialogsLimit < len(ranked) {
+		ranked = ranked[:dialogsLimit]
+	}
+	var out []postboxpkg.MessageRecord
+	for _, chat := range ranked {
+		rows := append([]postboxpkg.MessageRecord(nil), chat.rows...)
+		sortPostboxMessages(rows)
+		if messagesLimit > 0 && messagesLimit < len(rows) {
+			rows = rows[len(rows)-messagesLimit:]
+		}
+		out = append(out, rows...)
+	}
+	sortPostboxMessages(out)
+	return out
+}
+
+func sortPostboxMessages(messages []postboxpkg.MessageRecord) {
+	sort.Slice(messages, func(i, j int) bool {
+		if messages[i].TS == messages[j].TS {
+			return messages[i].SourcePK < messages[j].SourcePK
+		}
+		return messages[i].TS < messages[j].TS
+	})
+}
+
+func filterPostboxContactsForMessages(contacts map[string]store.Contact, messages []postboxpkg.MessageRecord) []store.Contact {
+	peerIDs := make(map[string]struct{})
+	for _, msg := range messages {
+		if msg.ChatID != "" {
+			peerIDs[msg.ChatID] = struct{}{}
+		}
+		if msg.SenderID != "" {
+			peerIDs[msg.SenderID] = struct{}{}
+		}
+	}
+	out := make([]store.Contact, 0, len(peerIDs))
+	for id := range peerIDs {
+		if contact, ok := contacts[id]; ok {
+			out = append(out, contact)
+		}
+	}
+	return out
+}
+
+func applyPostboxExistingMediaRefs(messages []postboxpkg.MessageRecord, opts ImportOptions, sourcePath string) int {
+	if !opts.FetchMedia || len(opts.ExistingMediaRefs) == 0 || !sameImportSourcePath(opts.ExistingMediaSourcePath, sourcePath) {
+		return 0
+	}
+	refs := make(map[int64]ExistingMediaRef, len(opts.ExistingMediaRefs))
+	for _, ref := range opts.ExistingMediaRefs {
+		if strings.TrimSpace(ref.MediaPath) != "" {
+			refs[ref.SourcePK] = ref
+		}
+	}
+	restored := 0
+	for i := range messages {
+		if messages[i].MediaPath != "" {
+			continue
+		}
+		ref, ok := refs[messages[i].SourcePK]
+		if !ok || strings.TrimSpace(ref.MediaPath) == "" {
+			continue
+		}
+		messages[i].MediaPath = ref.MediaPath
+		messages[i].MediaSize = ref.MediaSize
+		if messages[i].MediaType == "" {
+			messages[i].MediaType = ref.MediaType
+		}
+		if messages[i].MediaTitle == "" {
+			messages[i].MediaTitle = ref.MediaTitle
+		}
+		restored++
+	}
+	return restored
+}
+
+type postboxRemoteMediaStats struct {
+	Candidates  int
+	Attempted   int
+	Downloaded  int
+	Missing     int
+	Unavailable int
+	Timeouts    int
+	Errors      int
+}
+
+func postboxRemoteMediaCandidates(messages []postboxpkg.MessageRecord) []postboxpkg.MessageRecord {
+	var candidates []postboxpkg.MessageRecord
+	for _, msg := range messages {
+		if msg.MediaPath != "" || msg.MediaType == "" {
+			continue
+		}
+		if !postboxHasRemoteMediaIdentity(msg) || postboxCloudMediaKey(msg) == nil {
+			continue
+		}
+		candidates = append(candidates, msg)
+	}
+	return candidates
+}
+
+func postboxRemoteMediaMissingCount(messages []postboxpkg.MessageRecord) int {
+	seen := make(map[string]struct{})
+	for _, msg := range messages {
+		if key := postboxDuplicateMediaKey(msg); key != "" {
+			seen[key] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+func postboxHasRemoteMediaIdentity(msg postboxpkg.MessageRecord) bool {
+	return len(postboxMessageResourceIDs(msg)) > 0 || len(msg.ReferencedMediaIDs) > 0
+}
+
+func postboxMessageResourceIDs(msg postboxpkg.MessageRecord) []string {
+	var ids []string
+	seen := make(map[string]struct{})
+	for _, item := range msg.EmbeddedMedia {
+		for _, id := range postboxpkg.MediaResourceIDs(item) {
+			if _, ok := seen[id]; !ok {
+				ids = append(ids, id)
+				seen[id] = struct{}{}
+			}
+		}
+	}
+	return ids
+}
+
+type postboxCloudKey struct {
+	PeerID    int64
+	MessageID int64
+}
+
+func postboxCloudMediaKey(msg postboxpkg.MessageRecord) *postboxCloudKey {
+	parts := strings.SplitN(msg.MessageID, ":", 2)
+	if len(parts) != 2 || parts[0] != "0" {
+		return nil
+	}
+	messageID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || messageID <= 0 {
+		return nil
+	}
+	peerID, ok := postboxpkg.PostboxPeerToTelegramID(msg.RawChatID)
+	if !ok {
+		return nil
+	}
+	return &postboxCloudKey{PeerID: peerID, MessageID: messageID}
+}
+
+func postboxDuplicateMediaKey(msg postboxpkg.MessageRecord) string {
+	key := postboxCloudMediaKey(msg)
+	if key == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s:%d:%d:%s:%s:%s", msg.AccountID, key.PeerID, key.MessageID, msg.Timestamp, msg.MediaType, msg.MediaTitle)
+}
+
+func sharePostboxDuplicateMedia(messages []postboxpkg.MessageRecord) int {
+	known := make(map[string]ExistingMediaRef)
+	for _, msg := range messages {
+		key := postboxDuplicateMediaKey(msg)
+		if key == "" || msg.MediaPath == "" {
+			continue
+		}
+		if _, ok := known[key]; !ok {
+			known[key] = ExistingMediaRef{MediaPath: msg.MediaPath, MediaSize: msg.MediaSize}
+		}
+	}
+	filled := 0
+	for i := range messages {
+		if messages[i].MediaPath != "" || messages[i].MediaType == "" {
+			continue
+		}
+		key := postboxDuplicateMediaKey(messages[i])
+		ref, ok := known[key]
+		if !ok {
+			continue
+		}
+		messages[i].MediaPath = ref.MediaPath
+		messages[i].MediaSize = ref.MediaSize
+		filled++
+	}
+	return filled
+}
+
+func sharePostboxResourceMedia(messages []postboxpkg.MessageRecord) int {
+	known := make(map[string]ExistingMediaRef)
+	for _, msg := range messages {
+		if msg.MediaPath == "" {
+			continue
+		}
+		for _, resourceID := range postboxMessageResourceIDs(msg) {
+			previous, ok := known[resourceID]
+			if !ok || msg.MediaSize > previous.MediaSize {
+				known[resourceID] = ExistingMediaRef{MediaPath: msg.MediaPath, MediaSize: msg.MediaSize}
+			}
+		}
+	}
+	filled := 0
+	for i := range messages {
+		if messages[i].MediaPath != "" || messages[i].MediaType == "" {
+			continue
+		}
+		var best ExistingMediaRef
+		for _, resourceID := range postboxMessageResourceIDs(messages[i]) {
+			ref, ok := known[resourceID]
+			if ok && ref.MediaSize > best.MediaSize {
+				best = ref
+			}
+		}
+		if best.MediaPath == "" {
+			continue
+		}
+		messages[i].MediaPath = best.MediaPath
+		messages[i].MediaSize = best.MediaSize
+		filled++
+	}
+	return filled
+}
+
+func clearPostboxPlaceholderMedia(messages []postboxpkg.MessageRecord) int {
+	cleared := 0
+	for i := range messages {
+		if messages[i].MediaPath != "" || (messages[i].MediaType != "web_page" && messages[i].MediaType != "media") {
+			continue
+		}
+		messages[i].MediaType = ""
+		messages[i].MediaTitle = ""
+		messages[i].MediaSize = 0
+		cleared++
+	}
+	return cleared
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type importSource struct {
@@ -271,28 +544,6 @@ func resolveImportSourcePaths(path, tdesktop, postbox string) importSource {
 	return importSource{path: tdesktop}
 }
 
-func writeExistingMediaRefs(opts ImportOptions, sourcePath string) (string, func(), error) {
-	cleanup := func() {}
-	if !opts.FetchMedia || len(opts.ExistingMediaRefs) == 0 || !sameImportSourcePath(opts.ExistingMediaSourcePath, sourcePath) {
-		return "", cleanup, nil
-	}
-	file, err := os.CreateTemp("", "telecrawl-existing-media-*.json")
-	if err != nil {
-		return "", cleanup, fmt.Errorf("create existing media refs: %w", err)
-	}
-	cleanup = func() { _ = os.Remove(file.Name()) }
-	if err := json.NewEncoder(file).Encode(opts.ExistingMediaRefs); err != nil {
-		_ = file.Close()
-		cleanup()
-		return "", func() {}, fmt.Errorf("write existing media refs: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		cleanup()
-		return "", func() {}, fmt.Errorf("close existing media refs: %w", err)
-	}
-	return file.Name(), cleanup, nil
-}
-
 func sameImportSourcePath(left, right string) bool {
 	left = strings.TrimSpace(left)
 	right = strings.TrimSpace(right)
@@ -308,211 +559,6 @@ func sameImportSourcePath(left, right string) bool {
 		return false
 	}
 	return leftAbs == rightAbs
-}
-
-func runPythonImporter(ctx context.Context, python, scriptName, scriptContent string, args []string, deps string) (pyResult, error) {
-	script, cleanup, err := writeTempScript(scriptName, scriptContent)
-	if err != nil {
-		return pyResult{}, err
-	}
-	defer cleanup()
-
-	argv := append([]string{script}, args...)
-	cmd := exec.CommandContext(ctx, python, argv...) // #nosec G204 -- python and args are explicit CLI configuration.
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		installHint := pipInstallHint(deps)
-		if strings.Contains(msg, "missing dependency:") {
-			return pyResult{}, fmt.Errorf("python dependency missing: run `%s -m pip install %s`: %s", python, installHint, msg)
-		}
-		if strings.Contains(msg, "ModuleNotFoundError") || strings.Contains(msg, "No module named") {
-			return pyResult{}, fmt.Errorf("python dependency missing: run `%s -m pip install %s`: %s", python, installHint, msg)
-		}
-		if msg != "" {
-			return pyResult{}, fmt.Errorf("telegram import failed: %w: %s", err, msg)
-		}
-		return pyResult{}, fmt.Errorf("telegram import failed: %w", err)
-	}
-	var raw pyResult
-	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
-		return pyResult{}, fmt.Errorf("decode importer output: %w", err)
-	}
-	return raw, nil
-}
-
-func pipInstallHint(deps string) string {
-	fields := strings.Fields(deps)
-	for i, dep := range fields {
-		fields[i] = shellQuote(dep)
-	}
-	return strings.Join(fields, " ")
-}
-
-func shellQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	if !strings.ContainsAny(value, " \t\n'\"`$&;<>|()") {
-		return value
-	}
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
-}
-
-func decodeImportResult(raw pyResult, dbPath string) ImportResult {
-	result := ImportResult{}
-	started := parseTime(raw.StartedAt)
-	finished := parseTime(raw.FinishedAt)
-	result.Stats = store.ImportStats{
-		SourcePath:             raw.SourcePath,
-		DBPath:                 dbPath,
-		RemoteMediaCandidates:  raw.RemoteMedia.Candidates,
-		RemoteMediaAttempted:   raw.RemoteMedia.Attempted,
-		RemoteMediaDownloads:   raw.RemoteMedia.Downloaded,
-		RemoteMediaMissing:     raw.RemoteMedia.Missing,
-		RemoteMediaUnavailable: raw.RemoteMedia.Unavailable,
-		RemoteMediaTimeouts:    raw.RemoteMedia.Timeouts,
-		RemoteMediaErrors:      raw.RemoteMedia.Errors,
-		StartedAt:              started,
-		FinishedAt:             finished,
-	}
-	for _, c := range raw.Chats {
-		result.Chats = append(result.Chats, store.Chat{
-			JID:           c.ID,
-			Kind:          c.Kind,
-			Name:          c.Name,
-			Username:      c.Username,
-			LastMessageAt: parseTime(c.LastMessageAt),
-			UnreadCount:   c.UnreadCount,
-			MessageCount:  c.MessageCount,
-			FolderID:      c.FolderID,
-			Forum:         c.Forum,
-		})
-	}
-	for _, c := range raw.Contacts {
-		result.Contacts = append(result.Contacts, store.Contact{
-			JID:          c.ID,
-			PeerType:     c.PeerType,
-			Phone:        c.Phone,
-			FullName:     c.FullName,
-			FirstName:    c.FirstName,
-			LastName:     c.LastName,
-			BusinessName: c.BusinessName,
-			Username:     c.Username,
-			LID:          c.LID,
-			AboutText:    c.AboutText,
-			AvatarPath:   c.AvatarPath,
-			UpdatedAt:    parseTime(c.UpdatedAt),
-		})
-	}
-	for _, f := range raw.Folders {
-		result.Folders = append(result.Folders, store.Folder{
-			ID:        f.ID,
-			Title:     f.Title,
-			Emoticon:  f.Emoticon,
-			Color:     f.Color,
-			FlagsJSON: f.FlagsJSON,
-		})
-	}
-	for _, fc := range raw.FolderChats {
-		result.FolderChats = append(result.FolderChats, store.FolderChat{
-			FolderID: fc.FolderID,
-			ChatJID:  fc.ChatID,
-			Position: fc.Position,
-		})
-	}
-	for _, t := range raw.Topics {
-		result.Topics = append(result.Topics, store.Topic{
-			ChatJID:              t.ChatID,
-			TopicID:              t.TopicID,
-			Title:                t.Title,
-			TopMessageID:         t.TopMessageID,
-			IconColor:            t.IconColor,
-			IconEmojiID:          t.IconEmojiID,
-			UnreadCount:          t.UnreadCount,
-			UnreadMentionsCount:  t.UnreadMentionsCount,
-			UnreadReactionsCount: t.UnreadReactionsCount,
-			Pinned:               t.Pinned,
-			Closed:               t.Closed,
-			Hidden:               t.Hidden,
-			LastMessageAt:        parseTime(t.LastMessageAt),
-		})
-	}
-	for _, m := range raw.Messages {
-		msg := store.Message{
-			SourcePK:      m.SourcePK,
-			ChatJID:       m.ChatID,
-			ChatName:      m.ChatName,
-			MessageID:     m.MessageID,
-			TopicID:       m.TopicID,
-			ReplyToID:     m.ReplyToMessageID,
-			ReplyToChat:   m.ReplyToChatID,
-			ThreadID:      m.ThreadID,
-			SenderJID:     m.SenderID,
-			SenderName:    m.SenderName,
-			Timestamp:     parseTime(m.Timestamp),
-			EditTime:      parseTime(m.EditTimestamp),
-			FromMe:        m.FromMe,
-			Text:          m.Text,
-			MessageType:   m.MessageType,
-			MediaType:     m.MediaType,
-			MediaTitle:    m.MediaTitle,
-			MediaPath:     m.MediaPath,
-			MediaSize:     m.MediaSize,
-			MetadataType:  m.MetadataType,
-			MetadataTitle: m.MetadataTitle,
-			MetadataURL:   m.MetadataURL,
-			MetadataJSON:  m.MetadataJSON,
-			Views:         m.Views,
-			Forwards:      m.Forwards,
-			RepliesCount:  m.RepliesCount,
-			Pinned:        m.Pinned,
-			ForwardJSON:   m.ForwardJSON,
-			ReactionsJSON: m.ReactionsJSON,
-		}
-		if msg.MediaType != "" {
-			result.Stats.MediaMessages++
-		}
-		result.Messages = append(result.Messages, msg)
-	}
-	result.Stats.Chats = len(result.Chats)
-	result.Stats.Messages = len(result.Messages)
-	return result
-}
-
-func resolvePython(configured string) (string, error) {
-	if strings.TrimSpace(configured) != "" {
-		return configured, nil
-	}
-	if env := strings.TrimSpace(os.Getenv("TELECRAWL_PYTHON")); env != "" {
-		return env, nil
-	}
-	candidates := []string{
-		filepath.Join(defaultBaseDir(), "venv", "bin", "python"),
-		filepath.Join("/tmp", "telecrawl-opentele311", "bin", "python"),
-		filepath.Join(os.TempDir(), "telecrawl-opentele311", "bin", "python"),
-		"python3.11",
-		"python3.12",
-		"python3",
-	}
-	for _, candidate := range candidates {
-		if path, err := exec.LookPath(candidate); err == nil {
-			return path, nil
-		}
-		if strings.HasPrefix(candidate, string(filepath.Separator)) {
-			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-				return candidate, nil
-			}
-		}
-	}
-	return "", errors.New("python not found; install python3.11 or set TELECRAWL_PYTHON")
-}
-
-func defaultSessionPath(dbPath string) string {
-	sum := sha256.Sum256([]byte(dbPath))
-	return filepath.Join(defaultBaseDir(), "sessions", fmt.Sprintf("tdata-%x.session", sum[:6]))
 }
 
 func mediaArchiveDir(dbPath string) string {
@@ -691,24 +737,6 @@ func copyMediaFile(sourcePath, archiveDir string) (string, int64, error) {
 	}
 	removeTemp = false
 	return finalPath, size, nil
-}
-
-func defaultBaseDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".telecrawl")
-}
-
-func writeTempScript(name, content string) (string, func(), error) {
-	dir, err := os.MkdirTemp("", "telecrawl-import-*")
-	if err != nil {
-		return "", func() {}, err
-	}
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		_ = os.RemoveAll(dir)
-		return "", func() {}, err
-	}
-	return path, func() { _ = os.RemoveAll(dir) }, nil
 }
 
 func parseTime(value string) time.Time {

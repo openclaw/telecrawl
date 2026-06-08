@@ -41,7 +41,7 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean --config /tmp/.goreleaser.yaml
+          args: release --clean --config /tmp/.goreleaser.yaml --parallelism=2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

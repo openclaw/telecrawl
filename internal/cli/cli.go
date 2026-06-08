@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -54,7 +53,6 @@ type runtime struct {
 	json   bool
 	dbPath string
 	source string
-	python string
 }
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -67,7 +65,6 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	jsonOut := global.Bool("json", false, "")
 	dbPath := global.String("db", defaultDBPath(), "")
 	source := global.String("source", "", "")
-	python := global.String("python", "", "")
 	versionFlag := global.Bool("version", false, "")
 	if err := global.Parse(args); err != nil {
 		return usageErr(err)
@@ -85,7 +82,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		_, _ = io.WriteString(stdout, version+"\n")
 		return nil
 	}
-	r := &runtime{ctx: ctx, stdout: stdout, stderr: stderr, json: *jsonOut, dbPath: *dbPath, source: *source, python: *python}
+	r := &runtime{ctx: ctx, stdout: stdout, stderr: stderr, json: *jsonOut, dbPath: *dbPath, source: *source}
 	return r.dispatch(rest)
 }
 
@@ -113,66 +110,11 @@ func (r *runtime) dispatch(args []string) error {
 		return r.runSearch(args[1:])
 	case "backup":
 		return r.runBackup(args[1:])
-	case "deps":
-		return r.runDeps(args[1:])
 	case "wiretap":
 		return r.runImport(args[1:])
 	default:
 		return usageErr(fmt.Errorf("unknown command %q", args[0]))
 	}
-}
-
-func (r *runtime) runDeps(args []string) error {
-	if len(args) == 0 || args[0] != "install" {
-		return usageErr(errors.New("usage: telecrawl deps install"))
-	}
-	fs := flag.NewFlagSet("telecrawl deps install", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args[1:]); err != nil {
-		return usageErr(err)
-	}
-	if fs.NArg() != 0 {
-		return usageErr(errors.New("usage: telecrawl deps install"))
-	}
-	venv := filepath.Join(defaultBaseDir(), "venv")
-	python, err := exec.LookPath("python3.11")
-	if err != nil {
-		python, err = exec.LookPath("python3")
-		if err != nil {
-			return errors.New("python3.11 or python3 required")
-		}
-	}
-	if err := os.MkdirAll(defaultBaseDir(), 0o700); err != nil {
-		return err
-	}
-	if _, err := os.Stat(filepath.Join(venv, "bin", "python")); os.IsNotExist(err) {
-		if err := runLogged(r.ctx, r.stderr, python, "-m", "venv", venv); err != nil {
-			return err
-		}
-	}
-	pipPython := filepath.Join(venv, "bin", "python")
-	if err := runLogged(r.ctx, r.stderr, pipPython, "-m", "pip", "install", "--upgrade", "pip"); err != nil {
-		return err
-	}
-	installArgs := append([]string{"-m", "pip", "install"}, depsInstallPackages()...)
-	if err := runLogged(r.ctx, r.stderr, pipPython, installArgs...); err != nil {
-		return err
-	}
-	postboxDepsInstalled := true
-	postboxInstallArgs := append([]string{"-m", "pip", "install"}, postboxDepsInstallPackages()...)
-	if err := runLogged(r.ctx, r.stderr, pipPython, postboxInstallArgs...); err != nil {
-		postboxDepsInstalled = false
-		_, _ = fmt.Fprintf(r.stderr, "warning: optional native macOS Postbox dependency install failed: %v\n", err)
-	}
-	return r.print(map[string]any{"python": pipPython, "installed": true, "postbox_dependencies": postboxDepsInstalled})
-}
-
-func depsInstallPackages() []string {
-	return []string{"opentele2", "telethon>=1.43.2"}
-}
-
-func postboxDepsInstallPackages() []string {
-	return []string{"pycryptodomex", "sqlcipher3", "telethon>=1.43.2"}
 }
 
 func (r *runtime) withStore(fn func(*store.Store) error) error {
@@ -213,7 +155,6 @@ func (r *runtime) runImport(args []string) error {
 	fs := flag.NewFlagSet("telecrawl import", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	path := fs.String("path", r.source, "")
-	python := fs.String("python", r.python, "")
 	dialogsLimit := fs.Int("dialogs-limit", 200, "")
 	messagesLimit := fs.Int("messages-limit", 500, "")
 	chat := fs.String("chat", "", "")
@@ -236,7 +177,6 @@ func (r *runtime) runImport(args []string) error {
 		}
 		result, err := telegramdesktop.Import(r.ctx, telegramdesktop.ImportOptions{
 			Path:                    *path,
-			Python:                  *python,
 			DialogsLimit:            *dialogsLimit,
 			MessagesLimit:           *messagesLimit,
 			ChatID:                  *chat,
@@ -949,7 +889,6 @@ usage:
   telecrawl [--json] messages [--chat ID] [--topic ID] [--limit N] [--after DATE]
   telecrawl [--json] search "query" [--chat ID] [--topic ID]
   telecrawl [--json] backup init|push|pull|status
-  telecrawl deps install
   telecrawl version
 
 notes:
@@ -984,14 +923,4 @@ func defaultBaseDir() string {
 		return ".telecrawl"
 	}
 	return filepath.Join(home, ".telecrawl")
-}
-
-func runLogged(ctx context.Context, stderr io.Writer, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- dependency install uses fixed commands.
-	cmd.Stdout = stderr
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
-	}
-	return nil
 }

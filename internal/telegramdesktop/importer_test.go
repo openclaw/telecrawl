@@ -2,16 +2,21 @@ package telegramdesktop
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha512"
+	"encoding/binary"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
-	"time"
 
+	querymessages "github.com/gotd/td/telegram/query/messages"
+	"github.com/gotd/td/tg"
 	"github.com/openclaw/telecrawl/internal/store"
+	postboxpkg "github.com/openclaw/telecrawl/internal/telegramdesktop/postbox"
 )
 
 func TestResolveImportSourcePrefersTDataDefault(t *testing.T) {
@@ -46,41 +51,22 @@ func TestResolveImportSourceClassifiesExplicitPostboxPath(t *testing.T) {
 	}
 }
 
-func TestPipInstallHintQuotesVersionedRequirements(t *testing.T) {
-	got := pipInstallHint("opentele2 telethon>=1.43.2")
-	want := "opentele2 'telethon>=1.43.2'"
-	if got != want {
-		t.Fatalf("hint = %q, want %q", got, want)
-	}
-}
-
 func TestPostboxParserSanitizedFixture(t *testing.T) {
-	// Exercises the embedded Postbox decoder against public sanitized format fixtures.
-	python, err := resolvePython("")
-	if err != nil {
-		t.Skip(err)
-	}
-	script, cleanup, err := writeTempScript("import_postbox.py", importPostboxScript)
+	root, _, _ := makePostboxFixture(t)
+	result, err := Import(context.Background(), ImportOptions{
+		Path: root,
+	}, filepath.Join(t.TempDir(), "telecrawl.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cleanup()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, python, script, "--self-test", "--fixture-dir", filepath.Join("testdata", "postbox")).CombinedOutput() // #nosec G204 -- test executes the embedded importer with a resolved Python.
-	if err != nil {
-		t.Fatalf("postbox parser self-test failed: %v\n%s", err, out)
+	if len(result.Chats) != 1 || result.Chats[0].Name != "Fixture Person" {
+		t.Fatalf("chats = %#v", result.Chats)
 	}
-	var got struct {
-		OK      bool   `json:"ok"`
-		Fixture string `json:"fixture"`
+	if len(result.Contacts) != 1 || result.Contacts[0].FullName != "Fixture Person" {
+		t.Fatalf("contacts = %#v", result.Contacts)
 	}
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("decode self-test output: %v\n%s", err, out)
-	}
-	if !got.OK || got.Fixture != "sanitized-postbox-format" {
-		t.Fatalf("unexpected self-test output: %+v", got)
+	if len(result.Messages) != 1 || result.Messages[0].Text != "fixture hello" || result.Messages[0].MediaType != "photo_or_video" {
+		t.Fatalf("messages = %#v", result.Messages)
 	}
 }
 
@@ -206,177 +192,218 @@ func TestCopyImportedMediaSkipsMissingSourceCache(t *testing.T) {
 	}
 }
 
-func TestImportPassesFetchMediaToTDataImporter(t *testing.T) {
+func TestTDataStableSourcePKMatchesLegacyBridge(t *testing.T) {
 	t.Parallel()
-	python, argvPath := fakePythonImporter(t)
-	source := t.TempDir()
-
-	_, err := Import(context.Background(), ImportOptions{
-		Path:       source,
-		Python:     python,
-		FetchMedia: true,
-	}, filepath.Join(t.TempDir(), "telecrawl.db"))
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		chatID    string
+		messageID int
+		want      int64
+	}{
+		{"-10042", 7, 7461722351030121860},
+		{"123", 456, 6879695626693156840},
+		{"-1000000000042", 99, 3163150813737854790},
 	}
-
-	args := readImporterArgs(t, argvPath)
-	if !containsArg(args, "--fetch-media") {
-		t.Fatalf("args missing --fetch-media: %v", args)
-	}
-	idx := indexArg(args, "--media-output-dir")
-	if idx < 0 || idx+1 >= len(args) || strings.TrimSpace(args[idx+1]) == "" {
-		t.Fatalf("args missing --media-output-dir value: %v", args)
+	for _, tc := range tests {
+		if got := stableTDataSourcePK(tc.chatID, tc.messageID); got != tc.want {
+			t.Fatalf("stableTDataSourcePK(%q, %d) = %d, want %d", tc.chatID, tc.messageID, got, tc.want)
+		}
 	}
 }
 
-func TestImportPassesExistingMediaRefsToTDataImporter(t *testing.T) {
+func TestTDataPeerIDsMatchLegacyShape(t *testing.T) {
 	t.Parallel()
-	python, argvPath := fakePythonImporter(t)
-	source := t.TempDir()
+	tests := []struct {
+		name string
+		peer tg.PeerClass
+		want string
+	}{
+		{"user", &tg.PeerUser{UserID: 123}, "123"},
+		{"chat", &tg.PeerChat{ChatID: 456}, "-456"},
+		{"channel", &tg.PeerChannel{ChannelID: 789}, "-1000000000789"},
+	}
+	for _, tc := range tests {
+		if got := tdataPeerIDString(tc.peer, 0); got != tc.want {
+			t.Fatalf("%s peer id = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	inputs := map[tg.InputPeerClass]string{
+		&tg.InputPeerSelf{}:                  "42",
+		&tg.InputPeerUser{UserID: 123}:       "123",
+		&tg.InputPeerChat{ChatID: 456}:       "-456",
+		&tg.InputPeerChannel{ChannelID: 789}: "-1000000000789",
+	}
+	for input, want := range inputs {
+		if got := tdataInputPeerIDString(input, 42); got != want {
+			t.Fatalf("input peer id = %q, want %q", got, want)
+		}
+	}
+}
 
-	_, err := Import(context.Background(), ImportOptions{
-		Path:                    source,
-		Python:                  python,
-		FetchMedia:              true,
-		ExistingMediaSourcePath: source,
-		ExistingMediaRefs: []ExistingMediaRef{{
-			SourcePK:  42,
-			MediaType: "photo",
-			MediaPath: "/tmp/already-archived",
-			MediaSize: 12,
-		}},
-	}, filepath.Join(t.TempDir(), "telecrawl.db"))
-	if err != nil {
-		t.Fatal(err)
+func TestTDataChatFilterMatchesStoredAndRawIDs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		chatID string
+		filter string
+		want   bool
+	}{
+		{"user stored", "123", "123", true},
+		{"group stored", "-456", "-456", true},
+		{"group raw", "-456", "456", true},
+		{"channel stored", "-1000000000789", "-1000000000789", true},
+		{"channel no dash", "-1000000000789", "1000000000789", true},
+		{"channel raw", "-1000000000789", "789", true},
+		{"channel padded raw", "-1000000000789", "0000000789", true},
+		{"different", "-1000000000789", "790", false},
+	}
+	for _, tc := range tests {
+		if got := tdataChatFilterMatches(tc.chatID, tc.filter); got != tc.want {
+			t.Fatalf("%s: tdataChatFilterMatches(%q, %q) = %v, want %v", tc.name, tc.chatID, tc.filter, got, tc.want)
+		}
+	}
+}
+
+func TestTDataMediaMapping(t *testing.T) {
+	t.Parallel()
+	documentMessage := &tg.Message{Media: &tg.MessageMediaDocument{Document: &tg.Document{
+		Size: 1234,
+		Attributes: []tg.DocumentAttributeClass{
+			&tg.DocumentAttributeFilename{FileName: "fixture.pdf"},
+		},
+	}}}
+	if got := tdataMediaType(documentMessage); got != "document" {
+		t.Fatalf("document media type = %q", got)
+	}
+	if got := tdataMediaTitle(documentMessage); got != "fixture.pdf" {
+		t.Fatalf("document media title = %q", got)
+	}
+	if got := tdataMediaSize(documentMessage); got != 1234 {
+		t.Fatalf("document media size = %d", got)
+	}
+	webPage := &tg.WebPage{URL: "https://example.test/article"}
+	webPage.SetTitle("Fixture Article")
+	webMessage := &tg.Message{Media: &tg.MessageMediaWebPage{Webpage: webPage}}
+	if got := tdataMediaType(webMessage); got != "webpage" {
+		t.Fatalf("web media type = %q", got)
+	}
+	if got := tdataMediaTitle(webMessage); got != "Fixture Article" {
+		t.Fatalf("web media title = %q", got)
+	}
+}
+
+func TestTDataWebpageMediaFileFallback(t *testing.T) {
+	t.Parallel()
+	docPage := &tg.WebPage{}
+	docPage.SetDocument(&tg.Document{
+		ID:         1001,
+		MimeType:   "application/pdf",
+		AccessHash: 22,
+		Attributes: []tg.DocumentAttributeClass{
+			&tg.DocumentAttributeFilename{FileName: "preview.pdf"},
+		},
+	})
+	docFile, ok := telegramMessageFile(querymessages.Elem{Msg: &tg.Message{Media: &tg.MessageMediaWebPage{Webpage: docPage}}})
+	if !ok || docFile.Name != "preview.pdf" || docFile.MIMEType != "application/pdf" {
+		t.Fatalf("webpage document file = %#v ok=%v", docFile, ok)
+	}
+	if _, ok := docFile.Location.(*tg.InputDocumentFileLocation); !ok {
+		t.Fatalf("webpage document location = %T", docFile.Location)
 	}
 
-	args := readImporterArgs(t, argvPath)
-	idx := indexArg(args, "--existing-media-refs")
-	if idx < 0 || idx+1 >= len(args) || strings.TrimSpace(args[idx+1]) == "" {
-		t.Fatalf("args missing --existing-media-refs value: %v", args)
+	photoPage := &tg.WebPage{}
+	photoPage.SetPhoto(&tg.Photo{
+		ID:            2002,
+		AccessHash:    33,
+		FileReference: []byte{1, 2, 3},
+		Date:          1_800_000_000,
+		Sizes: []tg.PhotoSizeClass{
+			&tg.PhotoSize{Type: "s", W: 90, H: 90},
+			&tg.PhotoSize{Type: "x", W: 800, H: 600},
+		},
+	})
+	photoFile, ok := telegramMessageFile(querymessages.Elem{Msg: &tg.Message{Media: &tg.MessageMediaWebPage{Webpage: photoPage}}})
+	if !ok || photoFile.MIMEType != "image/jpeg" {
+		t.Fatalf("webpage photo file = %#v ok=%v", photoFile, ok)
+	}
+	location, ok := photoFile.Location.(*tg.InputPhotoFileLocation)
+	if !ok {
+		t.Fatalf("webpage photo location = %T", photoFile.Location)
+	}
+	if location.ThumbSize != "x" {
+		t.Fatalf("thumb size = %q, want x", location.ThumbSize)
+	}
+}
+
+func TestTDataExistingMediaRefsRequireFetchAndSameSource(t *testing.T) {
+	t.Parallel()
+	source := filepath.Join(t.TempDir(), "tdata")
+	ref := ExistingMediaRef{SourcePK: 42, MediaPath: "/tmp/already-archived", MediaSize: 12}
+	if refs := tdataExistingMediaRefs(ImportOptions{ExistingMediaRefs: []ExistingMediaRef{ref}}, source); refs != nil {
+		t.Fatalf("refs without fetch = %#v, want nil", refs)
+	}
+	if refs := tdataExistingMediaRefs(ImportOptions{FetchMedia: true, ExistingMediaSourcePath: filepath.Join(t.TempDir(), "other"), ExistingMediaRefs: []ExistingMediaRef{ref}}, source); refs != nil {
+		t.Fatalf("refs for different source = %#v, want nil", refs)
+	}
+	refs := tdataExistingMediaRefs(ImportOptions{FetchMedia: true, ExistingMediaSourcePath: source, ExistingMediaRefs: []ExistingMediaRef{ref}}, source)
+	if !reflect.DeepEqual(refs, map[int64]ExistingMediaRef{42: ref}) {
+		t.Fatalf("refs = %#v", refs)
+	}
+}
+
+func TestTDataReplyTopicMapping(t *testing.T) {
+	t.Parallel()
+	reply := &tg.MessageReplyHeader{}
+	reply.SetReplyToMsgID(10)
+	reply.SetReplyToTopID(5)
+	reply.SetReplyToPeerID(&tg.PeerChannel{ChannelID: 99})
+	msg := &tg.Message{}
+	msg.SetReplyTo(reply)
+	replyTo, threadID, replyChat, topicID := tdataReplyFields(msg, 0)
+	if replyTo != "10" || threadID != "5" || topicID != "5" || replyChat != "-1000000000099" {
+		t.Fatalf("reply fields = %q %q %q %q", replyTo, threadID, replyChat, topicID)
 	}
 }
 
 func TestImportPassesExistingMediaRefsToPostboxImporter(t *testing.T) {
 	t.Parallel()
-	python, argvPath := fakePythonImporter(t)
 	source, _, _ := makePostboxFixture(t)
+	media := filepath.Join(t.TempDir(), "already-archived")
+	if err := os.WriteFile(media, []byte("already archived"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
-	_, err := Import(context.Background(), ImportOptions{
+	result, err := Import(context.Background(), ImportOptions{
 		Path:                    source,
-		Python:                  python,
 		FetchMedia:              true,
 		ExistingMediaSourcePath: source,
 		ExistingMediaRefs: []ExistingMediaRef{{
-			SourcePK:  42,
+			SourcePK:  postboxpkg.SourcePK("stable/account-123", 100, 0, 1, false),
 			MediaType: "photo",
-			MediaPath: "/tmp/already-archived",
-			MediaSize: 12,
+			MediaPath: media,
+			MediaSize: int64(len("already archived")),
 		}},
 	}, filepath.Join(t.TempDir(), "telecrawl.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	args := readImporterArgs(t, argvPath)
-	idx := indexArg(args, "--existing-media-refs")
-	if idx < 0 || idx+1 >= len(args) || strings.TrimSpace(args[idx+1]) == "" {
-		t.Fatalf("args missing --existing-media-refs value: %v", args)
+	if len(result.Messages) != 1 || result.Messages[0].MediaPath == "" {
+		t.Fatalf("existing media ref was not restored: %#v", result.Messages)
+	}
+	if result.Stats.RemoteMediaMissing != 0 || result.Stats.RemoteMediaCandidates != 0 {
+		t.Fatalf("remote stats = %+v", result.Stats)
 	}
 }
 
 func TestImportDoesNotFetchMediaByDefault(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name   string
-		source func(t *testing.T) string
-	}{
-		{
-			name: "tdata",
-			source: func(t *testing.T) string {
-				t.Helper()
-				return t.TempDir()
-			},
-		},
-		{
-			name: "postbox",
-			source: func(t *testing.T) string {
-				t.Helper()
-				root, _, _ := makePostboxFixture(t)
-				return root
-			},
-		},
-	}
-	for _, tc := range tests {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			python, argvPath := fakePythonImporter(t)
-			_, err := Import(context.Background(), ImportOptions{
-				Path:   tc.source(t),
-				Python: python,
-			}, filepath.Join(t.TempDir(), "telecrawl.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			args := readImporterArgs(t, argvPath)
-			if containsArg(args, "--fetch-media") || containsArg(args, "--media-output-dir") {
-				t.Fatalf("default import should not fetch media: %v", args)
-			}
-		})
-	}
-}
-
-func fakePythonImporter(t *testing.T) (python string, argvPath string) {
-	t.Helper()
-	dir := t.TempDir()
-	argvPath = filepath.Join(dir, "argv")
-	python = filepath.Join(dir, "python")
-	result := `{"source_path":"fixture","started_at":"2026-01-01T00:00:00Z","finished_at":"2026-01-01T00:00:00Z","chats":[],"folders":[],"folder_chats":[],"topics":[],"messages":[]}`
-	body := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--probe\" ]; then exit 0; fi\nprintf '%%s\\n' \"$@\" > %q\nprintf '%%s\\n' '%s'\n", argvPath, result)
-	if err := os.WriteFile(python, []byte(body), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	waitForFakePython(t, python)
-	return python, argvPath
-}
-
-func waitForFakePython(t *testing.T, python string) {
-	t.Helper()
-	for range 20 {
-		err := exec.Command(python, "--probe").Run() // #nosec G204 -- test executes its own temporary helper.
-		if err == nil {
-			return
-		}
-		if !strings.Contains(err.Error(), "text file busy") {
-			t.Fatal(err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("fake python %s remained text file busy", python)
-}
-
-func readImporterArgs(t *testing.T, path string) []string {
-	t.Helper()
-	data, err := os.ReadFile(path)
+	source, _, _ := makePostboxFixture(t)
+	result, err := Import(context.Background(), ImportOptions{Path: source}, filepath.Join(t.TempDir(), "telecrawl.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return strings.Split(strings.TrimSpace(string(data)), "\n")
-}
-
-func containsArg(args []string, want string) bool {
-	return indexArg(args, want) >= 0
-}
-
-func indexArg(args []string, want string) int {
-	for i, arg := range args {
-		if arg == want {
-			return i
-		}
+	if result.Stats.RemoteMediaCandidates != 0 || result.Stats.RemoteMediaMissing != 0 {
+		t.Fatalf("postbox default import fetched media: %+v", result.Stats)
 	}
-	return -1
 }
 
 func makePostboxFixture(t *testing.T) (root string, lane string, account string) {
@@ -388,11 +415,86 @@ func makePostboxFixture(t *testing.T) (root string, lane string, account string)
 	if err := os.MkdirAll(dbDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(lane, ".tempkeyEncrypted"), []byte("key"), 0o600); err != nil {
+	keyAndSalt := make([]byte, 48)
+	for i := range keyAndSalt {
+		keyAndSalt[i] = byte(i)
+	}
+	if err := os.WriteFile(filepath.Join(lane, ".tempkeyEncrypted"), encryptedTempKeyFixture(t, []byte("no-matter-key"), keyAndSalt), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dbDir, "db_sqlite"), []byte("SQLite format 3\x00"), 0o600); err != nil {
+	fixtureDB := filepath.Join("postbox", "testdata", "sqlcipher_v4.db")
+	if err := copyFile(filepath.Join(dbDir, "db_sqlite"), fixtureDB); err != nil {
 		t.Fatal(err)
 	}
 	return root, lane, account
+}
+
+func copyFile(dst, src string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = out.Close() }()
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func encryptedTempKeyFixture(t *testing.T, passcode []byte, keyAndSalt []byte) []byte {
+	t.Helper()
+	plain := make([]byte, 64)
+	copy(plain, keyAndSalt)
+	binary.LittleEndian.PutUint32(plain[48:52], uint32(tempkeyMurmur3(keyAndSalt)))
+	digest := sha512.Sum512(passcode)
+	block, err := aes.NewCipher(digest[:32])
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]byte, len(plain))
+	cipher.NewCBCEncrypter(block, digest[48:]).CryptBlocks(out, plain)
+	return out
+}
+
+func tempkeyMurmur3(data []byte) int32 {
+	const seed uint32 = 0xf7ca7fd2
+	const c1 uint32 = 0xcc9e2d51
+	const c2 uint32 = 0x1b873593
+	length := len(data)
+	h1 := seed
+	roundedEnd := length & 0xfffffffc
+	for i := 0; i < roundedEnd; i += 4 {
+		k1 := uint32(data[i]) | uint32(data[i+1])<<8 | uint32(data[i+2])<<16 | uint32(data[i+3])<<24
+		k1 *= c1
+		k1 = (k1 << 15) | (k1 >> 17)
+		k1 *= c2
+		h1 ^= k1
+		h1 = (h1 << 13) | (h1 >> 19)
+		h1 = h1*5 + 0xe6546b64
+	}
+	var k1 uint32
+	switch length & 3 {
+	case 3:
+		k1 ^= uint32(data[roundedEnd+2]) << 16
+		fallthrough
+	case 2:
+		k1 ^= uint32(data[roundedEnd+1]) << 8
+		fallthrough
+	case 1:
+		k1 ^= uint32(data[roundedEnd])
+		k1 *= c1
+		k1 = (k1 << 15) | (k1 >> 17)
+		k1 *= c2
+		h1 ^= k1
+	}
+	h1 ^= uint32(length)
+	h1 ^= h1 >> 16
+	h1 *= 0x85ebca6b
+	h1 ^= h1 >> 13
+	h1 *= 0xc2b2ae35
+	h1 ^= h1 >> 16
+	return int32(h1)
 }

@@ -4,8 +4,5 @@
   "author_id": 4242,
   "media_type": "photo_or_video",
   "referenced_media_ids": [[7, 123456789]],
-  "chat_filter_source_pks": [1, 2],
-  "limited_source_pks": [3],
-  "single_account_peer_id": "100",
-  "raw_chat_filter_source_pks": [4, 5]
+  "single_account_peer_id": "100"
 }
