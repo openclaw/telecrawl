@@ -140,6 +140,20 @@ func TestPostboxPeerConversions(t *testing.T) {
 	if accountID != -7612928186999343859 {
 		t.Fatalf("account id = %d", accountID)
 	}
+	minID, err := AccountDirRecordID("account-9223372036854775808")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if minID != -9223372036854775808 {
+		t.Fatalf("minimum wrapped account id = %d", minID)
+	}
+	negativeOneID, err := AccountDirRecordID("account-18446744073709551615")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if negativeOneID != -1 {
+		t.Fatalf("wrapped account id = %d", negativeOneID)
+	}
 	tests := []struct {
 		peerID int64
 		want   int64

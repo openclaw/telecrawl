@@ -106,6 +106,34 @@ func TestNativeSessionForSource(t *testing.T) {
 	}
 }
 
+func TestNativeSessionForSourceRejectsOversizedPrimaryID(t *testing.T) {
+	root := t.TempDir()
+	source := makePostboxSourceFixture(t, root, "stable", "account-1")
+	shared := map[string]any{
+		"accounts": []any{
+			map[string]any{
+				"id":        json.Number("1"),
+				"primaryId": json.Number("9223372036854775807"),
+			},
+		},
+	}
+	data, err := json.Marshal(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lanePath := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(source.DBPath))))
+	if err := os.WriteFile(filepath.Join(lanePath, "accounts-shared-data"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := NativeSessionForSource(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session != nil {
+		t.Fatalf("session = %+v, want nil", session)
+	}
+}
+
 func makePostboxSourceFixture(t *testing.T, root, laneName, accountName string) Source {
 	t.Helper()
 	lane := filepath.Join(root, laneName)

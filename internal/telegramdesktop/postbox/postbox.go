@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -511,7 +512,17 @@ func AccountDirRecordID(accountDir string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return int64(unsigned), nil
+	return postboxSignedID(unsigned), nil
+}
+
+func postboxSignedID(unsigned uint64) int64 {
+	if unsigned <= uint64(math.MaxInt64) {
+		return int64(unsigned)
+	}
+	if unsigned == uint64(1)<<63 {
+		return math.MinInt64
+	}
+	return -int64((^unsigned) + 1)
 }
 
 func PostboxPeerToTelegramID(peerID int64) (int64, bool) {
