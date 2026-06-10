@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -139,11 +138,8 @@ func NativeSessionForSource(source Source) (*NativeSession, error) {
 		if !ok || id != accountRecordID {
 			continue
 		}
-		dcID64, ok := int64Value(account["primaryId"])
-		if !ok {
-			return nil, nil
-		}
-		if dcID64 < int64(math.MinInt) || dcID64 > int64(math.MaxInt) {
+		dcID64, err := strconv.ParseInt(cleanText(account["primaryId"]), 10, strconv.IntSize)
+		if err != nil {
 			return nil, nil
 		}
 		dcID := int(dcID64)

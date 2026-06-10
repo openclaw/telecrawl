@@ -409,7 +409,7 @@ func postboxMessageResourceIDs(msg postboxpkg.MessageRecord) []string {
 
 type postboxCloudKey struct {
 	PeerID    int64
-	MessageID int64
+	MessageID int
 }
 
 func postboxCloudMediaKey(msg postboxpkg.MessageRecord) *postboxCloudKey {
@@ -417,15 +417,15 @@ func postboxCloudMediaKey(msg postboxpkg.MessageRecord) *postboxCloudKey {
 	if len(parts) != 2 || parts[0] != "0" {
 		return nil
 	}
-	messageID, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil || messageID <= 0 {
+	messageID64, err := strconv.ParseInt(parts[1], 10, strconv.IntSize)
+	if err != nil || messageID64 <= 0 {
 		return nil
 	}
 	peerID, ok := postboxpkg.PostboxPeerToTelegramID(msg.RawChatID)
 	if !ok {
 		return nil
 	}
-	return &postboxCloudKey{PeerID: peerID, MessageID: messageID}
+	return &postboxCloudKey{PeerID: peerID, MessageID: int(messageID64)}
 }
 
 func postboxDuplicateMediaKey(msg postboxpkg.MessageRecord) string {

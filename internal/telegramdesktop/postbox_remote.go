@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 	"time"
@@ -211,10 +210,10 @@ func postboxSessionStorage(ctx context.Context, nativeSession *postboxpkg.Native
 
 func getPostboxRemoteMessage(ctx context.Context, raw *tg.Client, msg postboxpkg.MessageRecord) (tg.NotEmptyMessage, error) {
 	key := postboxCloudMediaKey(msg)
-	if key == nil || key.MessageID <= 0 || key.MessageID > int64(math.MaxInt) {
+	if key == nil || key.MessageID <= 0 {
 		return nil, errors.New("invalid Postbox cloud message id")
 	}
-	messageID := int(key.MessageID)
+	messageID := key.MessageID
 	inputPeer := postboxInputPeer(msg)
 	var firstErr error
 	if channel, ok := inputPeer.(*tg.InputPeerChannel); ok {

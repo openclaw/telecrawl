@@ -106,14 +106,14 @@ func TestNativeSessionForSource(t *testing.T) {
 	}
 }
 
-func TestNativeSessionForSourceRejectsOversizedPrimaryID(t *testing.T) {
+func TestNativeSessionForSourceRejectsInvalidPrimaryID(t *testing.T) {
 	root := t.TempDir()
 	source := makePostboxSourceFixture(t, root, "stable", "account-1")
 	shared := map[string]any{
 		"accounts": []any{
 			map[string]any{
 				"id":        json.Number("1"),
-				"primaryId": json.Number("9223372036854775807"),
+				"primaryId": json.Number("9223372036854775808"),
 			},
 		},
 	}
