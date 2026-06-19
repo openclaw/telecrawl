@@ -15,6 +15,7 @@
 ### Fixed
 
 - Migrate older local archives before creating topic indexes and tolerate nullable optional message fields from live Telegram data.
+- Fix generated backup recovery instructions to use the supported `telecrawl status` command.
 
 ## [0.2.0] - 2026-05-31
 
