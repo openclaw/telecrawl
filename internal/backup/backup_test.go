@@ -608,7 +608,8 @@ func resolveCommit(ctx context.Context, repo, ref string) (string, error) {
 func gitOutput(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...) // #nosec G204 -- tests pass only fixed Git commands and temporary paths.
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(
+		os.Environ(),
 		"GIT_AUTHOR_NAME=telecrawl-test",
 		"GIT_AUTHOR_EMAIL=telecrawl-test@example.invalid",
 		"GIT_COMMITTER_NAME=telecrawl-test",
