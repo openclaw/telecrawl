@@ -446,7 +446,7 @@ restore the local age identity file, then run:
 
 ` + "```bash" + `
 telecrawl backup pull
-telecrawl --sync never status
+telecrawl status
 ` + "```" + `
 
 Do not commit the age identity. Only public ` + "`age1...`" + ` recipients belong in

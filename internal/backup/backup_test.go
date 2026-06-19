@@ -529,6 +529,24 @@ func TestEnsureRepoFallsBackToLocalInitWhenCloneFails(t *testing.T) {
 	}
 }
 
+func TestBackupReadmeUsesSupportedStatusCommand(t *testing.T) {
+	repo := t.TempDir()
+	if err := writeBackupReadme(repo); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(repo, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	if strings.Contains(body, "--sync never") {
+		t.Fatal("backup README contains unsupported --sync flag")
+	}
+	if !strings.Contains(body, "telecrawl status") {
+		t.Fatal("backup README omits the supported status command")
+	}
+}
+
 func TestTopLevelErrorPaths(t *testing.T) {
 	ctx := context.Background()
 	source := openFixtureStore(t, "source.db")
