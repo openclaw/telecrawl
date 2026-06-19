@@ -306,8 +306,12 @@ func TestTDataWebpageMediaFileFallback(t *testing.T) {
 	if !ok || docFile.Name != "preview.pdf" || docFile.MIMEType != "application/pdf" {
 		t.Fatalf("webpage document file = %#v ok=%v", docFile, ok)
 	}
-	if _, ok := docFile.Location.(*tg.InputDocumentFileLocation); !ok {
+	docLocation, ok := docFile.Location.(*tg.InputDocumentFileLocation)
+	if !ok {
 		t.Fatalf("webpage document location = %T", docFile.Location)
+	}
+	if docLocation.ThumbSize != "" {
+		t.Fatalf("full webpage document thumb size = %q, want empty", docLocation.ThumbSize)
 	}
 
 	photoPage := &tg.WebPage{}

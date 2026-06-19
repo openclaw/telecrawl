@@ -462,7 +462,7 @@ func telegramMessageFile(elem querymessages.Elem) (querymessages.File, bool) {
 			return querymessages.File{
 				Name:     firstNonEmpty(tdataDocumentFilename(doc), tdataDocumentAudioTitle(doc), fmt.Sprintf("doc%d", doc.ID)),
 				MIMEType: doc.MimeType,
-				Location: doc.AsInputDocumentFileLocation(),
+				Location: doc.AsInputDocumentFileLocation(""),
 			}, true
 		}
 	}

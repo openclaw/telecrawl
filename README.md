@@ -195,6 +195,7 @@ Inspect backup metadata:
 
 ```bash
 telecrawl backup status
+telecrawl backup snapshots
 ```
 
 Restore into the current archive DB:
@@ -203,6 +204,18 @@ Restore into the current archive DB:
 telecrawl backup pull
 telecrawl status
 ```
+
+Every changed backup is a Git commit. Add a non-moving, visible checkpoint tag
+when needed, then restore that tag, commit, or branch without switching the
+backup checkout:
+
+```bash
+telecrawl backup push --tag snapshot/before-migration
+telecrawl --db /tmp/telecrawl-history.db backup pull --ref snapshot/before-migration
+```
+
+`backup snapshots --limit N` lists recent manifest-changing commits and tags.
+Keep tag names non-sensitive because Git metadata is not encrypted.
 
 Restore into a throwaway DB for validation:
 

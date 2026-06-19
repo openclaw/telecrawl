@@ -3,13 +3,17 @@ package backup
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"filippo.io/age"
+	ckbackup "github.com/openclaw/crawlkit/backup"
+	"github.com/openclaw/crawlkit/mirror"
 	"github.com/openclaw/telecrawl/internal/store"
 )
 
@@ -164,6 +168,107 @@ func TestEncryptedBackupPushPull(t *testing.T) {
 	}
 }
 
+func TestHistoricalSnapshotRestore(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	data := store.SnapshotData{
+		Chats:    []store.Chat{{JID: "chat", Kind: "dm", Name: "Chat", LastMessageAt: now}},
+		Messages: []store.Message{{SourcePK: 1, ChatJID: "chat", MessageID: "one", Timestamp: now, Text: "first snapshot", RawType: 0}},
+	}
+	st := openFixtureStore(t, "source.db")
+	if err := st.ImportSnapshot(ctx, data, "/fixture", now); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	runGit(t, "", "init", "--bare", remote)
+	repo := filepath.Join(t.TempDir(), "backup")
+	identity := filepath.Join(t.TempDir(), "age.key")
+	configPath := filepath.Join(t.TempDir(), "backup.json")
+	if _, _, err := Init(ctx, Options{ConfigPath: configPath, Repo: repo, Remote: remote, Identity: identity, Push: false}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Push(ctx, st, Options{ConfigPath: configPath, Push: false, Tag: "snapshot/initial"}); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := resolveCommit(ctx, repo, "snapshot/initial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data.Messages = append(data.Messages, store.Message{SourcePK: 2, ChatJID: "chat", MessageID: "two", Timestamp: now.Add(time.Minute), Text: "second snapshot", RawType: 0})
+	if err := st.ImportSnapshot(ctx, data, "/fixture", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Push(ctx, st, Options{ConfigPath: configPath, Push: true, Tag: "snapshot/current"}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := resolveCommit(ctx, repo, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots, snapshotsRepo, err := Snapshots(ctx, Options{ConfigPath: configPath, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshotsRepo != repo || len(snapshots) != 2 || snapshots[0].Ref != current || snapshots[1].Ref != initial {
+		t.Fatalf("unexpected snapshots repo=%s snapshots=%+v", snapshotsRepo, snapshots)
+	}
+	restored := openFixtureStore(t, "restored.db")
+	pulled, err := Pull(ctx, restored, Options{ConfigPath: configPath, Ref: "snapshot/initial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pulled.Ref != initial || pulled.Messages != 1 {
+		t.Fatalf("unexpected historical restore: %+v", pulled)
+	}
+	after, err := resolveCommit(ctx, repo, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != current {
+		t.Fatalf("historical restore changed checkout from %s to %s", current, after)
+	}
+	if _, err := Push(ctx, st, Options{ConfigPath: configPath, Push: false, Tag: "snapshot/initial"}); err == nil {
+		t.Fatal("moving an immutable snapshot tag should fail")
+	}
+}
+
+func TestEmptyBackupPreservesCountsAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	st := openFixtureStore(t, "empty.db")
+	repo := filepath.Join(t.TempDir(), "backup")
+	if err := os.MkdirAll(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "init")
+	identity := filepath.Join(t.TempDir(), "age.key")
+	recipient, err := EnsureIdentity(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{Repo: repo, Identity: identity, Recipients: []string{recipient}, Push: false}
+	first, err := Push(ctx, st, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Changed {
+		t.Fatal("first empty backup should commit")
+	}
+	manifest, err := ckbackup.ReadManifest(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messages, ok := manifest.Counts["messages"]; !ok || messages != 0 {
+		t.Fatalf("empty message count missing: %+v", manifest.Counts)
+	}
+	second, err := Push(ctx, st, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Changed {
+		t.Fatal("identical empty backup should not commit")
+	}
+}
+
 func TestConfigRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "backup.json")
 	cfg := DefaultConfig()
@@ -216,28 +321,28 @@ func TestCryptoHelpers(t *testing.T) {
 	if fromIdentity != recipient {
 		t.Fatalf("recipient mismatch: %q != %q", fromIdentity, recipient)
 	}
-	encrypted, hash, err := encryptShard([]byte("private text\n"), []string{recipient})
+	encrypted, hash, err := ckbackup.EncryptShard([]byte("private text\n"), []string{recipient})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hash != sha256Hex([]byte("private text\n")) || strings.Contains(string(encrypted), "private text") {
+	if hash != ckbackup.SHA256Hex([]byte("private text\n")) || strings.Contains(string(encrypted), "private text") {
 		t.Fatal("encrypted shard mismatch")
 	}
 	tmp := filepath.Join(t.TempDir(), "shard.age")
 	if err := os.WriteFile(tmp, encrypted, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	plain, err := decryptShard(encrypted, identity)
+	plain, err := ckbackup.DecryptShard(encrypted, identity)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(plain) != "private text\n" {
 		t.Fatalf("decrypt mismatch: %q", plain)
 	}
-	if _, _, err := encryptShard([]byte("x"), []string{"bad"}); err == nil {
+	if _, _, err := ckbackup.EncryptShard([]byte("x"), []string{"bad"}); err == nil {
 		t.Fatal("expected bad recipient error")
 	}
-	if _, _, err := encryptShard([]byte("x"), nil); err == nil {
+	if _, _, err := ckbackup.EncryptShard([]byte("x"), nil); err == nil {
 		t.Fatal("expected missing recipient encrypt error")
 	}
 	emptyIdentity := filepath.Join(t.TempDir(), "empty.key")
@@ -260,14 +365,14 @@ func TestCryptoHelpers(t *testing.T) {
 	if _, err := RecipientFromIdentity(badIdentity); err == nil {
 		t.Fatal("expected bad identity parse error")
 	}
-	if _, err := decryptShard([]byte("not age"), identity); err == nil {
+	if _, err := ckbackup.DecryptShard([]byte("not age"), identity); err == nil {
 		t.Fatal("expected bad ciphertext error")
 	}
 	otherIdentity := filepath.Join(t.TempDir(), "other.key")
 	if _, err := EnsureIdentity(otherIdentity); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := decryptShard(encrypted, otherIdentity); err == nil {
+	if _, err := ckbackup.DecryptShard(encrypted, otherIdentity); err == nil {
 		t.Fatal("expected wrong identity decrypt error")
 	}
 	recipientValue, err := age.ParseX25519Recipient(recipient)
@@ -285,7 +390,7 @@ func TestCryptoHelpers(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := decryptShard(rawAge.Bytes(), identity); err == nil {
+	if _, err := ckbackup.DecryptShard(rawAge.Bytes(), identity); err == nil {
 		t.Fatal("expected non-gzip decrypt error")
 	}
 	if _, err := EnsureIdentity(filepath.Join(t.TempDir(), "missing", "dir")); err != nil {
@@ -294,17 +399,17 @@ func TestCryptoHelpers(t *testing.T) {
 }
 
 func TestSnapshotErrorAndUtilityPaths(t *testing.T) {
-	if _, _, err := encodeJSONL(1); err == nil {
+	if _, _, err := ckbackup.EncodeJSONL(1); err == nil {
 		t.Fatal("expected unsupported JSONL row type")
 	}
 	var contacts []store.Contact
-	if err := decodeJSONL([]byte("{bad json}\n"), &contacts); err == nil {
+	if err := ckbackup.DecodeJSONL([]byte("{bad json}\n"), &contacts); err == nil {
 		t.Fatal("expected invalid JSONL error")
 	}
-	if err := removeStaleShards(t.TempDir(), nil); err != nil {
+	if err := ckbackup.RemoveStaleShards(t.TempDir(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if equivalentManifest(Manifest{Format: 1}, Manifest{Format: 2}) {
+	if ckbackup.EquivalentManifest(toCrawlkitManifest(Manifest{Format: 1}), toCrawlkitManifest(Manifest{Format: 2})) {
 		t.Fatal("different manifests should not be equivalent")
 	}
 	if _, err := readSnapshot(Config{}, Manifest{Format: 99}); err == nil {
@@ -319,13 +424,13 @@ func TestSnapshotErrorAndUtilityPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := t.TempDir()
-	if _, err := resolveShardPath(repo, "../outside.age"); err == nil {
+	if _, err := ckbackup.ResolveShardPath(repo, "../outside.age"); err == nil {
 		t.Fatal("expected escaping shard path error")
 	}
-	if _, err := resolveShardPath(repo, "manifest.json"); err == nil {
+	if _, err := ckbackup.ResolveShardPath(repo, "manifest.json"); err == nil {
 		t.Fatal("expected invalid shard path error")
 	}
-	encrypted, hash, err := encryptShard([]byte("{}\n"), []string{recipient})
+	encrypted, hash, err := ckbackup.EncryptShard([]byte("{}\n"), []string{recipient})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +451,7 @@ func TestSnapshotErrorAndUtilityPaths(t *testing.T) {
 	if _, err := readSnapshot(cfg, badHashManifest); err == nil {
 		t.Fatal("expected hash mismatch")
 	}
-	duplicatePlain, duplicateHash, err := encryptShard([]byte(`{"source_pk":1,"chat_jid":"chat","message_id":"a","timestamp":"2026-04-27T12:00:00Z","raw_type":0}`+"\n"+`{"source_pk":1,"chat_jid":"chat","message_id":"b","timestamp":"2026-04-27T12:00:01Z","raw_type":0}`+"\n"), []string{recipient})
+	duplicatePlain, duplicateHash, err := ckbackup.EncryptShard([]byte(`{"source_pk":1,"chat_jid":"chat","message_id":"a","timestamp":"2026-04-27T12:00:00Z","raw_type":0}`+"\n"+`{"source_pk":1,"chat_jid":"chat","message_id":"b","timestamp":"2026-04-27T12:00:01Z","raw_type":0}`+"\n"), []string{recipient})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +468,7 @@ func TestSnapshotErrorAndUtilityPaths(t *testing.T) {
 	if err := duplicateData.Validate(); err == nil {
 		t.Fatal("expected duplicate restored data validation error")
 	}
-	if err := writeManifest(repo, Manifest{Format: formatVersion}); err != nil {
+	if err := ckbackup.WriteManifest(repo, toCrawlkitManifest(Manifest{Format: formatVersion})); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readManifest(repo); err != nil {
@@ -381,7 +486,7 @@ func TestSnapshotErrorAndUtilityPaths(t *testing.T) {
 	if err := os.WriteFile(stalePath, []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeStaleShards(repo, []ShardEntry{{Path: filepath.ToSlash(shardPath)}}); err != nil {
+	if err := ckbackup.RemoveStaleShards(repo, []ShardEntry{{Path: filepath.ToSlash(shardPath)}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
@@ -402,6 +507,25 @@ func TestGitHelpersWithoutRemote(t *testing.T) {
 	}
 	if changed {
 		t.Fatal("empty repo without changes should not commit")
+	}
+}
+
+func TestEnsureRepoFallsBackToLocalInitWhenCloneFails(t *testing.T) {
+	ctx := context.Background()
+	repo := filepath.Join(t.TempDir(), "backup")
+	remote := filepath.Join(t.TempDir(), "missing.git")
+	if err := ensureRepo(ctx, Config{Repo: repo, Remote: remote}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := gitOutput(ctx, repo, "remote", "get-url", "origin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(out)) != remote {
+		t.Fatalf("origin = %q, want %q", strings.TrimSpace(string(out)), remote)
 	}
 }
 
@@ -472,7 +596,27 @@ func openFixtureStore(t *testing.T, name string) *store.Store {
 
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	if err := git(context.Background(), dir, args...); err != nil {
+	if _, err := gitOutput(context.Background(), dir, args...); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func resolveCommit(ctx context.Context, repo, ref string) (string, error) {
+	return mirror.ResolveCommit(ctx, mirror.Options{RepoPath: repo, Branch: "main"}, ref)
+}
+
+func gitOutput(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", args...) // #nosec G204 -- tests pass only fixed Git commands and temporary paths.
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=telecrawl-test",
+		"GIT_AUTHOR_EMAIL=telecrawl-test@example.invalid",
+		"GIT_COMMITTER_NAME=telecrawl-test",
+		"GIT_COMMITTER_EMAIL=telecrawl-test@example.invalid",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return out, nil
 }

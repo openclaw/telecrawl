@@ -6,6 +6,11 @@
 
 - Archive Telegram contact records from local Postbox imports. (#7; thanks @joshp123)
 - Expose Telegram contacts through the crawlkit `contact-export` metadata command for Clawdex imports. (#9; thanks @joshp123)
+- Add named Git backup snapshots, history listing, and non-mutating historical restores through `backup pull --ref`.
+
+### Changed
+
+- Move encrypted snapshot, Git history/tag/ref, contact export, and safe FTS query mechanics to CrawlKit while preserving the archive schema, backup manifest format, and CLI JSON contracts.
 
 ### Fixed
 
