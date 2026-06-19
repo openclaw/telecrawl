@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/openclaw/crawlkit/control"
 	"github.com/openclaw/telecrawl/internal/backup"
 	"github.com/openclaw/telecrawl/internal/store"
 	"github.com/openclaw/telecrawl/internal/telegramdesktop"
@@ -428,15 +429,6 @@ func (r *runtime) runContacts(args []string) error {
 	})
 }
 
-type contactExport struct {
-	Contacts []exportedContact `json:"contacts"`
-}
-
-type exportedContact struct {
-	DisplayName  string   `json:"display_name"`
-	PhoneNumbers []string `json:"phone_numbers"`
-}
-
 func (r *runtime) runContactsExport(args []string) error {
 	fs := flag.NewFlagSet("telecrawl contacts export", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -451,12 +443,16 @@ func (r *runtime) runContactsExport(args []string) error {
 		if err != nil {
 			return err
 		}
-		return r.print(contactExport{Contacts: exportContacts(contacts)})
+		export := control.ContactExport{Contacts: exportContacts(contacts)}
+		if err := control.ValidateContactExport(export); err != nil {
+			return err
+		}
+		return r.print(export)
 	})
 }
 
-func exportContacts(contacts []store.Contact) []exportedContact {
-	out := make([]exportedContact, 0, len(contacts))
+func exportContacts(contacts []store.Contact) []control.Contact {
+	out := make([]control.Contact, 0, len(contacts))
 	byPhone := map[string]store.Contact{}
 	phoneOrder := make([]string, 0, len(contacts))
 	for _, contact := range contacts {
@@ -480,7 +476,7 @@ func exportContacts(contacts []store.Contact) []exportedContact {
 	for _, phone := range phoneOrder {
 		contact := byPhone[phone]
 		name := contactDisplayName(contact)
-		out = append(out, exportedContact{DisplayName: name, PhoneNumbers: []string{phone}})
+		out = append(out, control.Contact{DisplayName: name, PhoneNumbers: []string{phone}})
 	}
 	return out
 }
@@ -657,7 +653,7 @@ func (r *runtime) messageFilter(name string, args []string, requireQuery bool) (
 
 func (r *runtime) runBackup(args []string) error {
 	if len(args) == 0 {
-		return usageErr(errors.New("backup needs subcommand: init, push, pull, status"))
+		return usageErr(errors.New("backup needs subcommand: init, push, pull, status, snapshots"))
 	}
 	switch args[0] {
 	case "init":
@@ -668,6 +664,8 @@ func (r *runtime) runBackup(args []string) error {
 		return r.backupPull(args[1:])
 	case "status":
 		return r.backupStatus(args[1:])
+	case "snapshots":
+		return r.backupSnapshots(args[1:])
 	default:
 		return usageErr(fmt.Errorf("unknown backup command %q", args[0]))
 	}
@@ -681,6 +679,9 @@ func backupFlags(name string) (*flag.FlagSet, *backup.Options, *bool) {
 	fs.StringVar(&opts.Repo, "repo", "", "")
 	fs.StringVar(&opts.Remote, "remote", "", "")
 	fs.StringVar(&opts.Identity, "identity", "", "")
+	fs.StringVar(&opts.Ref, "ref", "", "")
+	fs.StringVar(&opts.Tag, "tag", "", "")
+	fs.IntVar(&opts.Limit, "limit", 20, "")
 	fs.Func("recipient", "", func(value string) error {
 		opts.Recipients = append(opts.Recipients, value)
 		return nil
@@ -741,6 +742,27 @@ func (r *runtime) backupStatus(args []string) error {
 		return err
 	}
 	return r.print(map[string]any{"repo": repo, "manifest": manifest})
+}
+
+func (r *runtime) backupSnapshots(args []string) error {
+	fs, opts, _ := backupFlags("telecrawl backup snapshots")
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() != 0 {
+		return usageErr(errors.New("backup snapshots takes flags only"))
+	}
+	if opts.Limit < 1 {
+		return usageErr(errors.New("backup snapshots --limit must be greater than zero"))
+	}
+	snapshots, repo, err := backup.Snapshots(r.ctx, *opts)
+	if err != nil {
+		return err
+	}
+	if r.json {
+		return r.print(map[string]any{"repo": repo, "snapshots": snapshots})
+	}
+	return r.print(snapshots)
 }
 
 func (r *runtime) printProbe(report telegramdesktop.Report) error {
@@ -853,6 +875,17 @@ func (r *runtime) print(v any) error {
 			}
 		}
 		return nil
+	case []backup.Snapshot:
+		for _, snapshot := range value {
+			ref := snapshot.Ref
+			if len(snapshot.Tags) > 0 {
+				ref = snapshot.Tags[0]
+			}
+			if _, err := fmt.Fprintf(r.stdout, "%s\t%s\t%d\t%d\t%s\n", ref, snapshot.Exported.Format(time.RFC3339), snapshot.Counts.Messages, snapshot.Shards, strings.Join(snapshot.Tags, ",")); err != nil {
+				return err
+			}
+		}
+		return nil
 	default:
 		enc.SetIndent("", "  ")
 		return enc.Encode(v)
@@ -888,7 +921,7 @@ usage:
   telecrawl [--json] topics --chat ID [--limit N]
   telecrawl [--json] messages [--chat ID] [--topic ID] [--limit N] [--after DATE]
   telecrawl [--json] search "query" [--chat ID] [--topic ID]
-  telecrawl [--json] backup init|push|pull|status
+  telecrawl [--json] backup init|push|pull|status|snapshots
   telecrawl version
 
 notes:

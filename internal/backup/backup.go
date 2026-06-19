@@ -1,23 +1,20 @@
 package backup
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 	"time"
 
+	ckbackup "github.com/openclaw/crawlkit/backup"
+	"github.com/openclaw/crawlkit/mirror"
 	"github.com/openclaw/telecrawl/internal/store"
 )
 
-const formatVersion = 1
+const formatVersion = ckbackup.FormatVersion
 
 type Manifest struct {
 	Format     int          `json:"format"`
@@ -39,13 +36,7 @@ type Counts struct {
 	Messages     int `json:"messages"`
 }
 
-type ShardEntry struct {
-	Table  string `json:"table"`
-	Path   string `json:"path"`
-	Rows   int    `json:"rows"`
-	SHA256 string `json:"sha256"`
-	Bytes  int64  `json:"bytes"`
-}
+type ShardEntry = ckbackup.ShardEntry
 
 type Result struct {
 	Repo      string `json:"repo"`
@@ -53,6 +44,8 @@ type Result struct {
 	Encrypted bool   `json:"encrypted"`
 	Shards    int    `json:"shards"`
 	Messages  int    `json:"messages"`
+	Ref       string `json:"ref,omitempty"`
+	Tag       string `json:"tag,omitempty"`
 }
 
 func Init(ctx context.Context, opts Options) (Config, string, error) {
@@ -95,6 +88,9 @@ func Push(ctx context.Context, st *store.Store, opts Options) (Result, error) {
 	if err := ensureRepo(ctx, cfg); err != nil {
 		return Result{}, err
 	}
+	if err := validateSnapshotTag(ctx, cfg.Repo, opts.Tag); err != nil {
+		return Result{}, err
+	}
 	if err := writeBackupReadme(cfg.Repo); err != nil {
 		return Result{}, err
 	}
@@ -107,11 +103,21 @@ func Push(ctx context.Context, st *store.Store, opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	changed, err := commitAndPush(ctx, cfg, "sync: update encrypted telecrawl backup", opts.Push)
+	pushWithTag := opts.Push && strings.TrimSpace(opts.Tag) != ""
+	changed, err := commitAndPush(ctx, cfg, "sync: update encrypted telecrawl backup", opts.Push && !pushWithTag)
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Repo: cfg.Repo, Changed: changed, Encrypted: true, Shards: len(manifest.Shards), Messages: manifest.Counts.Messages}, nil
+	tag, err := tagSnapshot(ctx, cfg, opts.Tag)
+	if err != nil {
+		return Result{}, err
+	}
+	if pushWithTag {
+		if err := mirror.PushAtomic(ctx, mirrorOptions(cfg), "HEAD", "refs/tags/"+tag); err != nil {
+			return Result{}, err
+		}
+	}
+	return Result{Repo: cfg.Repo, Changed: changed, Encrypted: true, Shards: len(manifest.Shards), Messages: manifest.Counts.Messages, Tag: tag}, nil
 }
 
 func Pull(ctx context.Context, st *store.Store, opts Options) (Result, error) {
@@ -119,24 +125,37 @@ func Pull(ctx context.Context, st *store.Store, opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if err := ensureRepo(ctx, cfg); err != nil {
+	ensure := ensureRepo
+	if strings.TrimSpace(opts.Ref) != "" {
+		ensure = ensureRepoForRead
+	}
+	if err := ensure(ctx, cfg); err != nil {
 		return Result{}, err
 	}
-	manifest, err := readManifest(cfg.Repo)
+	manifest, ref, err := readManifestAtRef(ctx, cfg.Repo, opts.Ref)
 	if err != nil {
 		return Result{}, err
 	}
-	data, err := readSnapshot(cfg, manifest)
+	var data store.SnapshotData
+	if ref == "" {
+		data, err = readSnapshot(cfg, manifest)
+	} else {
+		data, err = readSnapshotAtRef(ctx, cfg, manifest, ref)
+	}
 	if err != nil {
 		return Result{}, err
 	}
 	if err := data.Validate(); err != nil {
 		return Result{}, err
 	}
-	if err := st.ImportSnapshot(ctx, data, "backup:"+cfg.Repo, manifest.Exported); err != nil {
+	sourcePath := "backup:" + cfg.Repo
+	if ref != "" {
+		sourcePath += "@" + ref
+	}
+	if err := st.ImportSnapshot(ctx, data, sourcePath, manifest.Exported); err != nil {
 		return Result{}, err
 	}
-	return Result{Repo: cfg.Repo, Changed: true, Encrypted: manifest.Encrypted, Shards: len(manifest.Shards), Messages: len(data.Messages)}, nil
+	return Result{Repo: cfg.Repo, Changed: true, Encrypted: manifest.Encrypted, Shards: len(manifest.Shards), Messages: len(data.Messages), Ref: ref}, nil
 }
 
 func Status(ctx context.Context, opts Options) (Manifest, string, error) {
@@ -155,125 +174,91 @@ func Status(ctx context.Context, opts Options) (Manifest, string, error) {
 }
 
 func writeSnapshot(ctx context.Context, cfg Config, data store.SnapshotData, old Manifest) (Manifest, error) {
-	_ = ctx
-	recipients := normalizedStrings(cfg.Recipients)
-	reuseEncrypted := sameStrings(old.Recipients, recipients)
-	var shards []ShardEntry
-	add := func(table, rel string, rows any) error {
-		plaintext, count, err := encodeJSONL(rows)
-		if err != nil {
-			return err
-		}
-		entry, err := writeShard(cfg, old, table, rel, plaintext, count, reuseEncrypted)
-		if err != nil {
-			return err
-		}
-		shards = append(shards, entry)
-		return nil
-	}
-	staticTables := []struct {
-		table string
-		path  string
-		rows  any
-	}{
-		{"contacts", "data/contacts.jsonl.gz.age", data.Contacts},
-		{"chats", "data/chats.jsonl.gz.age", data.Chats},
-		{"folders", "data/folders.jsonl.gz.age", data.Folders},
-		{"folder_chats", "data/folder_chats.jsonl.gz.age", data.FolderChats},
-		{"groups", "data/groups.jsonl.gz.age", data.Groups},
-		{"group_participants", "data/group_participants.jsonl.gz.age", data.Participants},
-		{"topics", "data/topics.jsonl.gz.age", data.Topics},
-	}
-	for _, table := range staticTables {
-		if err := add(table.table, table.path, table.rows); err != nil {
-			return Manifest{}, err
-		}
+	shards := []ckbackup.Shard{
+		{Table: "contacts", Path: "data/contacts.jsonl.gz.age", Rows: data.Contacts},
+		{Table: "chats", Path: "data/chats.jsonl.gz.age", Rows: data.Chats},
+		{Table: "folders", Path: "data/folders.jsonl.gz.age", Rows: data.Folders},
+		{Table: "folder_chats", Path: "data/folder_chats.jsonl.gz.age", Rows: data.FolderChats},
+		{Table: "groups", Path: "data/groups.jsonl.gz.age", Rows: data.Groups},
+		{Table: "group_participants", CountKey: "participants", Path: "data/group_participants.jsonl.gz.age", Rows: data.Participants},
+		{Table: "topics", Path: "data/topics.jsonl.gz.age", Rows: data.Topics},
 	}
 	for _, shard := range messageShards(data.Messages) {
-		if err := add("messages", shard.path, shard.messages); err != nil {
-			return Manifest{}, err
-		}
+		shards = append(shards, ckbackup.Shard{Table: "messages", Path: shard.path, Rows: shard.messages})
 	}
-	sort.Slice(shards, func(i, j int) bool { return shards[i].Path < shards[j].Path })
-	manifest := Manifest{
-		Format:     formatVersion,
-		Encrypted:  true,
-		Exported:   time.Now().UTC(),
-		Recipients: recipients,
-		Counts: Counts{
-			Contacts:     len(data.Contacts),
-			Chats:        len(data.Chats),
-			Folders:      len(data.Folders),
-			FolderChats:  len(data.FolderChats),
-			Groups:       len(data.Groups),
-			Participants: len(data.Participants),
-			Topics:       len(data.Topics),
-			Messages:     len(data.Messages),
-		},
-		Shards: shards,
+	sharedOld := toCrawlkitManifest(old)
+	if len(data.Messages) == 0 {
+		delete(sharedOld.Counts, "messages")
 	}
-	if equivalentManifest(old, manifest) {
+	manifest, err := ckbackup.WriteSnapshot(ctx, crawlkitConfig(cfg), shards, sharedOld)
+	if err != nil {
+		return Manifest{}, err
+	}
+	manifest.Counts["contacts"] = len(data.Contacts)
+	manifest.Counts["chats"] = len(data.Chats)
+	manifest.Counts["folders"] = len(data.Folders)
+	manifest.Counts["folder_chats"] = len(data.FolderChats)
+	manifest.Counts["groups"] = len(data.Groups)
+	manifest.Counts["participants"] = len(data.Participants)
+	manifest.Counts["topics"] = len(data.Topics)
+	manifest.Counts["messages"] = len(data.Messages)
+	if ckbackup.EquivalentManifest(toCrawlkitManifest(old), manifest) {
 		return old, nil
 	}
-	if err := removeStaleShards(cfg.Repo, shards); err != nil {
+	if err := ckbackup.WriteManifest(cfg.Repo, manifest); err != nil {
 		return Manifest{}, err
 	}
-	if err := writeManifest(cfg.Repo, manifest); err != nil {
-		return Manifest{}, err
-	}
-	return manifest, nil
+	return fromCrawlkitManifest(manifest), nil
 }
 
 func readSnapshot(cfg Config, manifest Manifest) (store.SnapshotData, error) {
-	if manifest.Format != formatVersion {
-		return store.SnapshotData{}, fmt.Errorf("unsupported backup format %d", manifest.Format)
+	shards, err := ckbackup.ReadSnapshot(crawlkitConfig(cfg), toCrawlkitManifest(manifest))
+	if err != nil {
+		return store.SnapshotData{}, err
 	}
+	return decodeSnapshot(shards)
+}
+
+func decodeSnapshot(shards []ckbackup.DecodedShard) (store.SnapshotData, error) {
 	var data store.SnapshotData
-	for _, shard := range manifest.Shards {
-		plaintext, err := decryptShardFile(cfg, shard)
-		if err != nil {
-			return store.SnapshotData{}, err
-		}
-		if got := sha256Hex(plaintext); got != shard.SHA256 {
-			return store.SnapshotData{}, fmt.Errorf("backup shard hash mismatch for %s", shard.Path)
-		}
-		switch shard.Table {
+	for _, shard := range shards {
+		switch shard.Entry.Table {
 		case "contacts":
-			if err := decodeJSONL(plaintext, &data.Contacts); err != nil {
+			if err := ckbackup.DecodeJSONL(shard.Plaintext, &data.Contacts); err != nil {
 				return store.SnapshotData{}, err
 			}
 		case "chats":
-			if err := decodeJSONL(plaintext, &data.Chats); err != nil {
+			if err := ckbackup.DecodeJSONL(shard.Plaintext, &data.Chats); err != nil {
 				return store.SnapshotData{}, err
 			}
 		case "folders":
-			if err := decodeJSONL(plaintext, &data.Folders); err != nil {
+			if err := ckbackup.DecodeJSONL(shard.Plaintext, &data.Folders); err != nil {
 				return store.SnapshotData{}, err
 			}
 		case "folder_chats":
-			if err := decodeJSONL(plaintext, &data.FolderChats); err != nil {
+			if err := ckbackup.DecodeJSONL(shard.Plaintext, &data.FolderChats); err != nil {
 				return store.SnapshotData{}, err
 			}
 		case "groups":
-			if err := decodeJSONL(plaintext, &data.Groups); err != nil {
+			if err := ckbackup.DecodeJSONL(shard.Plaintext, &data.Groups); err != nil {
 				return store.SnapshotData{}, err
 			}
 		case "group_participants":
-			if err := decodeJSONL(plaintext, &data.Participants); err != nil {
+			if err := ckbackup.DecodeJSONL(shard.Plaintext, &data.Participants); err != nil {
 				return store.SnapshotData{}, err
 			}
 		case "topics":
-			if err := decodeJSONL(plaintext, &data.Topics); err != nil {
+			if err := ckbackup.DecodeJSONL(shard.Plaintext, &data.Topics); err != nil {
 				return store.SnapshotData{}, err
 			}
 		case "messages":
 			var messages []store.Message
-			if err := decodeJSONL(plaintext, &messages); err != nil {
+			if err := ckbackup.DecodeJSONL(shard.Plaintext, &messages); err != nil {
 				return store.SnapshotData{}, err
 			}
 			data.Messages = append(data.Messages, messages...)
 		default:
-			return store.SnapshotData{}, fmt.Errorf("unknown backup table %q", shard.Table)
+			return store.SnapshotData{}, fmt.Errorf("unknown backup table %q", shard.Entry.Table)
 		}
 	}
 	sort.Slice(data.Messages, func(i, j int) bool {
@@ -283,88 +268,6 @@ func readSnapshot(cfg Config, manifest Manifest) (store.SnapshotData, error) {
 		return data.Messages[i].Timestamp.Before(data.Messages[j].Timestamp)
 	})
 	return data, nil
-}
-
-func writeShard(cfg Config, old Manifest, table, rel string, plaintext []byte, rows int, reuseEncrypted bool) (ShardEntry, error) {
-	hash := sha256Hex(plaintext)
-	path, err := resolveShardPath(cfg.Repo, rel)
-	if err != nil {
-		return ShardEntry{}, err
-	}
-	if oldEntry, ok := old.entry(rel); reuseEncrypted && ok && oldEntry.SHA256 == hash {
-		if info, err := os.Stat(path); err == nil {
-			oldEntry.Bytes = info.Size()
-			return oldEntry, nil
-		}
-	}
-	encrypted, _, err := encryptShard(plaintext, cfg.Recipients)
-	if err != nil {
-		return ShardEntry{}, err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return ShardEntry{}, err
-	}
-	if err := os.WriteFile(path, encrypted, 0o600); err != nil {
-		return ShardEntry{}, err
-	}
-	return ShardEntry{Table: table, Path: rel, Rows: rows, SHA256: hash, Bytes: int64(len(encrypted))}, nil
-}
-
-func decryptShardFile(cfg Config, shard ShardEntry) ([]byte, error) {
-	path, err := resolveShardPath(cfg.Repo, shard.Path)
-	if err != nil {
-		return nil, err
-	}
-	ciphertext, err := os.ReadFile(path) // #nosec G304 -- resolveShardPath confines manifest-controlled shard paths to data/*.age inside the backup repo.
-	if err != nil {
-		return nil, err
-	}
-	return decryptShard(ciphertext, cfg.Identity)
-}
-
-func resolveShardPath(repo, rel string) (string, error) {
-	clean := path.Clean(strings.TrimSpace(rel))
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) {
-		return "", fmt.Errorf("backup shard path escapes backup root: %s", rel)
-	}
-	if !strings.HasPrefix(clean, "data/") || !strings.HasSuffix(clean, ".age") {
-		return "", fmt.Errorf("invalid backup shard path: %s", rel)
-	}
-	full := filepath.Join(repo, filepath.FromSlash(clean))
-	root := filepath.Clean(filepath.Join(repo, "data"))
-	parent := filepath.Clean(filepath.Dir(full))
-	if parent != root && !strings.HasPrefix(parent, root+string(filepath.Separator)) {
-		return "", fmt.Errorf("backup shard path escapes backup root: %s", rel)
-	}
-	return full, nil
-}
-
-func encodeJSONL(rows any) ([]byte, int, error) {
-	value := reflect.ValueOf(rows)
-	if value.Kind() != reflect.Slice {
-		return nil, 0, fmt.Errorf("unsupported JSONL rows %T", rows)
-	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	for i := 0; i < value.Len(); i++ {
-		if err := enc.Encode(value.Index(i).Interface()); err != nil {
-			return nil, 0, err
-		}
-	}
-	return buf.Bytes(), value.Len(), nil
-}
-
-func decodeJSONL[T any](plaintext []byte, out *[]T) error {
-	scanner := bufio.NewScanner(bytes.NewReader(plaintext))
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	for scanner.Scan() {
-		var value T
-		if err := json.Unmarshal(scanner.Bytes(), &value); err != nil {
-			return err
-		}
-		*out = append(*out, value)
-	}
-	return scanner.Err()
 }
 
 type messageShard struct {
@@ -404,116 +307,59 @@ func messageShards(messages []store.Message) []messageShard {
 }
 
 func readManifest(repo string) (Manifest, error) {
-	data, err := os.ReadFile(filepath.Join(repo, "manifest.json")) // #nosec G304 -- repo is the configured local backup repository.
+	manifest, err := ckbackup.ReadManifest(repo)
 	if err != nil {
 		return Manifest{}, err
 	}
-	var manifest Manifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return Manifest{}, err
-	}
-	return manifest, nil
+	return fromCrawlkitManifest(manifest), nil
 }
 
-func writeManifest(repo string, manifest Manifest) error {
-	data, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	return os.WriteFile(filepath.Join(repo, "manifest.json"), data, 0o600)
+func crawlkitConfig(cfg Config) ckbackup.Config {
+	return ckbackup.Config{Repo: cfg.Repo, Identity: cfg.Identity, Recipients: cfg.Recipients}
 }
 
-func (m Manifest) entry(path string) (ShardEntry, bool) {
-	for _, shard := range m.Shards {
-		if shard.Path == path {
-			return shard, true
-		}
+func toCrawlkitManifest(manifest Manifest) ckbackup.Manifest {
+	return ckbackup.Manifest{
+		Format:     manifest.Format,
+		Encrypted:  manifest.Encrypted,
+		Exported:   manifest.Exported,
+		Recipients: manifest.Recipients,
+		Counts: map[string]int{
+			"contacts":     manifest.Counts.Contacts,
+			"chats":        manifest.Counts.Chats,
+			"folders":      manifest.Counts.Folders,
+			"folder_chats": manifest.Counts.FolderChats,
+			"groups":       manifest.Counts.Groups,
+			"participants": manifest.Counts.Participants,
+			"topics":       manifest.Counts.Topics,
+			"messages":     manifest.Counts.Messages,
+		},
+		Shards: manifest.Shards,
 	}
-	return ShardEntry{}, false
 }
 
-func equivalentManifest(a, b Manifest) bool {
-	if a.Format != b.Format || a.Encrypted != b.Encrypted || !sameStrings(a.Recipients, b.Recipients) || a.Counts != b.Counts || len(a.Shards) != len(b.Shards) {
-		return false
+func fromCrawlkitManifest(manifest ckbackup.Manifest) Manifest {
+	participants := manifest.Counts["participants"]
+	if participants == 0 {
+		participants = manifest.Counts["group_participants"]
 	}
-	for i := range a.Shards {
-		left, right := a.Shards[i], b.Shards[i]
-		left.Bytes, right.Bytes = 0, 0
-		if left != right {
-			return false
-		}
+	return Manifest{
+		Format:     manifest.Format,
+		Encrypted:  manifest.Encrypted,
+		Exported:   manifest.Exported,
+		Recipients: manifest.Recipients,
+		Counts: Counts{
+			Contacts:     manifest.Counts["contacts"],
+			Chats:        manifest.Counts["chats"],
+			Folders:      manifest.Counts["folders"],
+			FolderChats:  manifest.Counts["folder_chats"],
+			Groups:       manifest.Counts["groups"],
+			Participants: participants,
+			Topics:       manifest.Counts["topics"],
+			Messages:     manifest.Counts["messages"],
+		},
+		Shards: manifest.Shards,
 	}
-	return true
-}
-
-func normalizedStrings(values []string) []string {
-	seen := map[string]struct{}{}
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func sameStrings(a, b []string) bool {
-	a, b = normalizedStrings(a), normalizedStrings(b)
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func removeStaleShards(repo string, shards []ShardEntry) error {
-	keep := map[string]struct{}{}
-	for _, shard := range shards {
-		keep[filepath.Clean(filepath.Join(repo, filepath.FromSlash(shard.Path)))] = struct{}{}
-	}
-	root := filepath.Join(repo, "data")
-	if _, err := os.Stat(root); os.IsNotExist(err) {
-		return nil
-	}
-	var stale []string
-	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d == nil || d.IsDir() {
-			return err
-		}
-		if !strings.HasSuffix(path, ".age") {
-			return nil
-		}
-		clean := filepath.Clean(path)
-		if _, ok := keep[clean]; ok {
-			return nil
-		}
-		stale = append(stale, clean)
-		return nil
-	}); err != nil {
-		return err
-	}
-	for _, path := range stale {
-		rel, err := filepath.Rel(root, path)
-		if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-			return fmt.Errorf("stale shard path escapes backup root: %s", path)
-		}
-		if err := os.Remove(path); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func writeBackupReadme(repo string) error {
@@ -535,8 +381,11 @@ README.md
 manifest.json
 data/chats.jsonl.gz.age
 data/contacts.jsonl.gz.age
+data/folders.jsonl.gz.age
+data/folder_chats.jsonl.gz.age
 data/groups.jsonl.gz.age
 data/group_participants.jsonl.gz.age
+data/topics.jsonl.gz.age
 data/messages/YYYY/MM.jsonl.gz.age
 ` + "```" + `
 
@@ -567,21 +416,28 @@ may still contain shards decryptable by the compromised key.
 
 ` + "```bash" + `
 telecrawl backup push
+telecrawl backup push --tag snapshot/before-migration
 ` + "```" + `
 
 The command pulls/rebases this checkout, refreshes the local telecrawl archive
 according to the normal sync policy, writes encrypted shards, updates the
 manifest, commits, and pushes this repository.
 
+Every changed backup is a Git commit. Optional tags name important checkpoints;
+tag names are visible Git metadata and should not contain sensitive text.
+
 ## Restore
 
 ` + "```bash" + `
 telecrawl backup pull
+telecrawl backup snapshots
+telecrawl --db /tmp/telecrawl-history.db backup pull --ref snapshot/before-migration
 ` + "```" + `
 
 ` + "`backup pull`" + ` decrypts every shard with the local age identity, verifies the
 manifest hashes, validates the snapshot, and imports it into the configured
-telecrawl archive database.
+telecrawl archive database. Historical refs are read directly from Git objects
+without changing this checkout's current branch.
 
 ## Recovery
 
