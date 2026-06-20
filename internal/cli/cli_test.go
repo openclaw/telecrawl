@@ -433,6 +433,21 @@ func TestUsageDocumentsMediaFetchOptIn(t *testing.T) {
 	}
 }
 
+func TestSubcommandHelpPrintsUsage(t *testing.T) {
+	t.Parallel()
+	var out, errOut bytes.Buffer
+	err := Run(context.Background(), []string{"import", "--help"}, &out, &errOut)
+	if err != nil {
+		t.Fatalf("help returned error: %v stderr=%s", err, errOut.String())
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", errOut.String())
+	}
+	if !strings.Contains(out.String(), "telecrawl [--json] import") {
+		t.Fatalf("help output missing import usage:\n%s", out.String())
+	}
+}
+
 func accountScopedImportResult(label string) telegramdesktop.ImportResult {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	return telegramdesktop.ImportResult{
