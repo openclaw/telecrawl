@@ -62,7 +62,7 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "::error::Set HOMEBREW_TAP_TOKEN with workflow access to steipete/homebrew-tap"
+            echo "::error::Set HOMEBREW_TAP_TOKEN with workflow access to openclaw/homebrew-tap"
             exit 1
           fi
 
@@ -70,7 +70,7 @@ jobs:
           expected_title="Update telecrawl for ${RELEASE_TAG} (${request_id})"
 
           gh workflow run update-formula.yml \
-            --repo steipete/homebrew-tap \
+            --repo openclaw/homebrew-tap \
             --ref main \
             -f formula=telecrawl \
             -f tag="$RELEASE_TAG" \
@@ -82,7 +82,7 @@ jobs:
           run_id=""
           for _ in {1..30}; do
             run_id=$(gh run list \
-              --repo steipete/homebrew-tap \
+              --repo openclaw/homebrew-tap \
               --workflow update-formula.yml \
               --branch main \
               --event workflow_dispatch \
@@ -101,6 +101,6 @@ jobs:
           fi
 
           gh run watch "$run_id" \
-            --repo steipete/homebrew-tap \
+            --repo openclaw/homebrew-tap \
             --exit-status \
             --interval 10
