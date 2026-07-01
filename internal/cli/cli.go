@@ -182,6 +182,7 @@ func (r *runtime) runImport(args []string) error {
 			MessagesLimit:           *messagesLimit,
 			ChatID:                  *chat,
 			FetchMedia:              *fetchMedia,
+			Progress:                r.stderr,
 			ExistingMediaSourcePath: existingMediaSourcePath,
 			ExistingMediaRefs:       existingMediaRefs,
 		}, st.Path())

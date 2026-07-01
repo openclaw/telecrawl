@@ -2,6 +2,10 @@
 
 ## [0.3.1] - Unreleased
 
+### Fixed
+
+- Retry Telegram API reads after bounded, visible, and cancellable flood waits without restarting paginated imports. (#16; thanks @masonc15)
+
 ## [0.3.0] - 2026-06-19
 
 ### Added

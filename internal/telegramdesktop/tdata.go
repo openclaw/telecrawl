@@ -76,6 +76,7 @@ func importTDataGo(ctx context.Context, sourcePath string, opts ImportOptions, d
 		SessionStorage: storage,
 		NoUpdates:      true,
 		AllowCDN:       true,
+		Middlewares:    []telegram.Middleware{newTelegramFloodWaitPolicy(opts.Progress)},
 		Device: telegram.DeviceConfig{
 			DeviceModel:    "Desktop",
 			SystemVersion:  "Windows 11",
@@ -426,7 +427,8 @@ func downloadTelegramMessageMedia(ctx context.Context, raw *tg.Client, elem quer
 		name = "media"
 	}
 	outputPath := filepath.Join(messageDir, name)
-	downloadCtx, cancel := context.WithTimeout(ctx, 180*time.Second)
+	// Reserve the retry budget so a valid flood wait cannot consume the transfer deadline.
+	downloadCtx, cancel := context.WithTimeout(ctx, telegramMediaDownloadTimeout)
 	defer cancel()
 	if _, err := downloader.NewDownloader().WithAllowCDN(true).Download(raw, file.Location).ToPath(downloadCtx, outputPath); err != nil {
 		if errors.Is(downloadCtx.Err(), context.DeadlineExceeded) {

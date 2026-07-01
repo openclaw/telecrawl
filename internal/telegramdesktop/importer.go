@@ -23,6 +23,7 @@ type ImportOptions struct {
 	MessagesLimit           int
 	ChatID                  string
 	FetchMedia              bool
+	Progress                io.Writer
 	ExistingMediaSourcePath string
 	ExistingMediaRefs       []ExistingMediaRef
 }
@@ -151,7 +152,7 @@ func importPostboxGo(ctx context.Context, sourcePath string, opts ImportOptions,
 	}
 	remoteMedia := postboxRemoteMediaStats{Downloaded: 0, Missing: 0}
 	if opts.FetchMedia {
-		remoteMedia = downloadPostboxRemoteMedia(ctx, messages, sources, mediaTempDir)
+		remoteMedia = downloadPostboxRemoteMedia(ctx, messages, sources, mediaTempDir, opts.Progress)
 	}
 	sharePostboxDuplicateMedia(messages)
 	sharePostboxResourceMedia(messages)
