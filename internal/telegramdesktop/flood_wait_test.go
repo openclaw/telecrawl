@@ -66,7 +66,7 @@ func TestTelegramFloodWaitPolicyRejectsWaitAboveLimit(t *testing.T) {
 		return nil
 	}
 	next := telegram.InvokeFunc(func(context.Context, bin.Encoder, bin.Decoder) error {
-		return tgerr.New(420, "FLOOD_WAIT_300")
+		return tgerr.New(420, "FLOOD_WAIT_301")
 	})
 
 	err := policy.Handle(next).Invoke(context.Background(), nil, nil)
@@ -75,6 +75,30 @@ func TestTelegramFloodWaitPolicyRejectsWaitAboveLimit(t *testing.T) {
 	}
 	if _, ok := tgerr.AsFloodWait(err); ok {
 		t.Fatalf("error still classifies as FLOOD_WAIT: %v", err)
+	}
+}
+
+func TestTelegramFloodWaitPolicyAcceptsWaitAtLimit(t *testing.T) {
+	policy := newTelegramFloodWaitPolicy(nil)
+	var wait time.Duration
+	policy.sleep = func(_ context.Context, delay time.Duration) error {
+		wait = delay
+		return nil
+	}
+	calls := 0
+	next := telegram.InvokeFunc(func(context.Context, bin.Encoder, bin.Decoder) error {
+		calls++
+		if calls == 1 {
+			return tgerr.New(420, "FLOOD_WAIT_300")
+		}
+		return nil
+	})
+
+	if err := policy.Handle(next).Invoke(context.Background(), nil, nil); err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if wait != 5*time.Minute+time.Second {
+		t.Fatalf("wait = %s, want 5m1s", wait)
 	}
 }
 

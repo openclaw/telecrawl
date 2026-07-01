@@ -16,7 +16,8 @@ import (
 const (
 	telegramFloodWaitMaxRetries  = 3
 	telegramFloodWaitMaxDelay    = 5 * time.Minute
-	telegramFloodWaitRetryBudget = telegramFloodWaitMaxRetries * telegramFloodWaitMaxDelay
+	telegramFloodWaitSafetyDelay = time.Second
+	telegramFloodWaitRetryBudget = telegramFloodWaitMaxRetries * (telegramFloodWaitMaxDelay + telegramFloodWaitSafetyDelay)
 	telegramMediaDownloadTimeout = 3*time.Minute + telegramFloodWaitRetryBudget
 	postboxRemoteMessageTimeout  = 45*time.Second + telegramFloodWaitRetryBudget
 )
@@ -48,10 +49,10 @@ func (p *telegramFloodWaitPolicy) Handle(next tg.Invoker) telegram.InvokeFunc {
 			if retries >= telegramFloodWaitMaxRetries {
 				return fmt.Errorf("telegram flood-wait retry limit exceeded after %d retries: %v", telegramFloodWaitMaxRetries, err)
 			}
-			wait := delay + time.Second
-			if wait > telegramFloodWaitMaxDelay {
-				return fmt.Errorf("telegram flood wait of %s exceeds %s limit: %v", wait, telegramFloodWaitMaxDelay, err)
+			if delay > telegramFloodWaitMaxDelay {
+				return fmt.Errorf("telegram flood wait of %s exceeds %s limit: %v", delay, telegramFloodWaitMaxDelay, err)
 			}
+			wait := delay + telegramFloodWaitSafetyDelay
 			p.reportWait(wait, retries+1)
 			if err := p.sleep(ctx, wait); err != nil {
 				return fmt.Errorf("wait for telegram rate limit: %w", err)
