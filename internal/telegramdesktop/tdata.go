@@ -23,7 +23,6 @@ import (
 	"github.com/gotd/td/telegram/query/dialogs"
 	querymessages "github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
-	"github.com/gotd/td/tgerr"
 	"github.com/openclaw/telecrawl/internal/store"
 	"golang.org/x/crypto/blake2b"
 )
@@ -77,6 +76,7 @@ func importTDataGo(ctx context.Context, sourcePath string, opts ImportOptions, d
 		SessionStorage: storage,
 		NoUpdates:      true,
 		AllowCDN:       true,
+		Middlewares:    []telegram.Middleware{newTelegramFloodWaitPolicy(opts.Progress)},
 		Device: telegram.DeviceConfig{
 			DeviceModel:    "Desktop",
 			SystemVersion:  "Windows 11",
@@ -180,42 +180,40 @@ func (s *tdataImportSession) loadDialogs(ctx context.Context) ([]tdataDialog, er
 		limit = 0
 	}
 	count := 0
-	err := tdataWithFloodWait(ctx, func(ctx context.Context) error {
-		return query.GetDialogs(s.raw).BatchSize(tdataBatchSize).ForEach(ctx, func(ctx context.Context, elem dialogs.Elem) error {
-			if elem.Deleted() {
-				return nil
-			}
-			chatID := tdataPeerIDString(elem.Dialog.GetPeer(), s.selfID)
-			if chatID == "" {
-				return nil
-			}
-			if _, ok := seen[chatID]; ok {
-				return nil
-			}
-			seen[chatID] = struct{}{}
-			info := tdataPeerInfo(elem.Dialog.GetPeer(), elem.Entities, s.selfID)
-			folderID := tdataDialogFolderID(elem.Dialog)
-			if chatFilter != "" && !tdataChatFilterMatches(chatID, chatFilter) {
-				return nil
-			}
-			out = append(out, tdataDialog{
-				elem:     elem,
-				chatID:   chatID,
-				chatName: firstNonEmpty(info.name, chatID),
-				kind:     firstNonEmpty(info.kind, "unknown"),
-				username: info.username,
-				folderID: folderID,
-				forum:    info.forum,
-			})
-			count++
-			if chatFilter != "" {
-				return errTDataStop
-			}
-			if limit > 0 && count >= limit {
-				return errTDataStop
-			}
+	err := query.GetDialogs(s.raw).BatchSize(tdataBatchSize).ForEach(ctx, func(ctx context.Context, elem dialogs.Elem) error {
+		if elem.Deleted() {
 			return nil
+		}
+		chatID := tdataPeerIDString(elem.Dialog.GetPeer(), s.selfID)
+		if chatID == "" {
+			return nil
+		}
+		if _, ok := seen[chatID]; ok {
+			return nil
+		}
+		seen[chatID] = struct{}{}
+		info := tdataPeerInfo(elem.Dialog.GetPeer(), elem.Entities, s.selfID)
+		folderID := tdataDialogFolderID(elem.Dialog)
+		if chatFilter != "" && !tdataChatFilterMatches(chatID, chatFilter) {
+			return nil
+		}
+		out = append(out, tdataDialog{
+			elem:     elem,
+			chatID:   chatID,
+			chatName: firstNonEmpty(info.name, chatID),
+			kind:     firstNonEmpty(info.kind, "unknown"),
+			username: info.username,
+			folderID: folderID,
+			forum:    info.forum,
 		})
+		count++
+		if chatFilter != "" {
+			return errTDataStop
+		}
+		if limit > 0 && count >= limit {
+			return errTDataStop
+		}
+		return nil
 	})
 	if errors.Is(err, errTDataStop) {
 		err = nil
@@ -296,26 +294,18 @@ func (s *tdataImportSession) loadMessages(ctx context.Context, row tdataDialog) 
 	limit := s.opts.MessagesLimit
 	count := 0
 	var out []store.Message
-	seen := make(map[int]struct{})
-	err := tdataWithFloodWait(ctx, func(ctx context.Context) error {
-		return row.elem.Messages(s.raw).BatchSize(tdataBatchSize).ForEach(ctx, func(ctx context.Context, elem querymessages.Elem) error {
-			msg := elem.Msg
-			msgID := msg.GetID()
-			if msgID == 0 {
-				return nil
-			}
-			if _, ok := seen[msgID]; ok {
-				return nil
-			}
-			seen[msgID] = struct{}{}
-			converted := s.convertMessage(ctx, row, elem)
-			out = append(out, converted)
-			count++
-			if limit > 0 && count >= limit {
-				return errTDataStop
-			}
+	err := row.elem.Messages(s.raw).BatchSize(tdataBatchSize).ForEach(ctx, func(ctx context.Context, elem querymessages.Elem) error {
+		msg := elem.Msg
+		if msg.GetID() == 0 {
 			return nil
-		})
+		}
+		converted := s.convertMessage(ctx, row, elem)
+		out = append(out, converted)
+		count++
+		if limit > 0 && count >= limit {
+			return errTDataStop
+		}
+		return nil
 	})
 	if errors.Is(err, errTDataStop) {
 		err = nil
@@ -437,7 +427,8 @@ func downloadTelegramMessageMedia(ctx context.Context, raw *tg.Client, elem quer
 		name = "media"
 	}
 	outputPath := filepath.Join(messageDir, name)
-	downloadCtx, cancel := context.WithTimeout(ctx, 180*time.Second)
+	// Reserve the retry budget so a valid flood wait cannot consume the transfer deadline.
+	downloadCtx, cancel := context.WithTimeout(ctx, telegramMediaDownloadTimeout)
 	defer cancel()
 	if _, err := downloader.NewDownloader().WithAllowCDN(true).Download(raw, file.Location).ToPath(downloadCtx, outputPath); err != nil {
 		if errors.Is(downloadCtx.Err(), context.DeadlineExceeded) {
@@ -520,12 +511,7 @@ func tdataLargestPhotoThumbSize(photo *tg.Photo) string {
 }
 
 func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, []store.FolderChat) {
-	var result *tg.MessagesDialogFilters
-	err := tdataWithFloodWait(ctx, func(ctx context.Context) error {
-		var callErr error
-		result, callErr = s.raw.MessagesGetDialogFilters(ctx)
-		return callErr
-	})
+	result, err := s.raw.MessagesGetDialogFilters(ctx)
 	if err != nil || result == nil {
 		return nil, nil
 	}
@@ -548,20 +534,18 @@ func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, [
 			}
 		}
 		if id, err := strconv.Atoi(folder.ID); err == nil && id != 0 {
-			_ = tdataWithFloodWait(ctx, func(ctx context.Context) error {
-				return query.GetDialogs(s.raw).FolderID(id).BatchSize(tdataBatchSize).ForEach(ctx, func(ctx context.Context, elem dialogs.Elem) error {
-					chatID := tdataPeerIDString(elem.Dialog.GetPeer(), s.selfID)
-					if chatID == "" {
-						return nil
-					}
-					set := memberships[folder.ID]
-					if set == nil {
-						set = make(map[string]struct{})
-						memberships[folder.ID] = set
-					}
-					set[chatID] = struct{}{}
+			_ = query.GetDialogs(s.raw).FolderID(id).BatchSize(tdataBatchSize).ForEach(ctx, func(ctx context.Context, elem dialogs.Elem) error {
+				chatID := tdataPeerIDString(elem.Dialog.GetPeer(), s.selfID)
+				if chatID == "" {
 					return nil
-				})
+				}
+				set := memberships[folder.ID]
+				if set == nil {
+					set = make(map[string]struct{})
+					memberships[folder.ID] = set
+				}
+				set[chatID] = struct{}{}
+				return nil
 			})
 		}
 	}
@@ -603,12 +587,7 @@ func (s *tdataImportSession) loadTopics(ctx context.Context, row tdataDialog) []
 		Limit: tdataBatchSize,
 	}
 	for {
-		var result *tg.MessagesForumTopics
-		err := tdataWithFloodWait(ctx, func(ctx context.Context) error {
-			var callErr error
-			result, callErr = s.raw.MessagesGetForumTopics(ctx, &req)
-			return callErr
-		})
+		result, err := s.raw.MessagesGetForumTopics(ctx, &req)
 		if err != nil || result == nil || len(result.Topics) == 0 {
 			return out
 		}
@@ -648,37 +627,6 @@ func (s *tdataImportSession) loadTopics(ctx context.Context, row tdataDialog) []
 		req.OffsetTopic = last.ID
 		req.OffsetID = last.TopMessage
 		req.OffsetDate = last.Date
-	}
-}
-
-func tdataWithFloodWait(ctx context.Context, fn func(context.Context) error) error {
-	return tdataWithFloodWaitSleep(ctx, tdataSleep, fn)
-}
-
-func tdataWithFloodWaitSleep(ctx context.Context, sleep func(context.Context, time.Duration) error, fn func(context.Context) error) error {
-	for {
-		err := fn(ctx)
-		if err == nil {
-			return nil
-		}
-		delay, ok := tgerr.AsFloodWait(err)
-		if !ok {
-			return err
-		}
-		if err := sleep(ctx, delay+time.Second); err != nil {
-			return err
-		}
-	}
-}
-
-func tdataSleep(ctx context.Context, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 

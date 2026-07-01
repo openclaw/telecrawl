@@ -6,18 +6,15 @@ import (
 	"crypto/cipher"
 	"crypto/sha512"
 	"encoding/binary"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	querymessages "github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
-	"github.com/gotd/td/tgerr"
 	"github.com/openclaw/telecrawl/internal/store"
 	postboxpkg "github.com/openclaw/telecrawl/internal/telegramdesktop/postbox"
 )
@@ -354,51 +351,6 @@ func TestTDataExistingMediaRefsRequireFetchAndSameSource(t *testing.T) {
 	refs := tdataExistingMediaRefs(ImportOptions{FetchMedia: true, ExistingMediaSourcePath: source, ExistingMediaRefs: []ExistingMediaRef{ref}}, source)
 	if !reflect.DeepEqual(refs, map[int64]ExistingMediaRef{42: ref}) {
 		t.Fatalf("refs = %#v", refs)
-	}
-}
-
-func TestTDataWithFloodWaitRetriesAfterDelay(t *testing.T) {
-	t.Parallel()
-	var waits []time.Duration
-	attempts := 0
-	err := tdataWithFloodWaitSleep(context.Background(), func(_ context.Context, delay time.Duration) error {
-		waits = append(waits, delay)
-		return nil
-	}, func(context.Context) error {
-		attempts++
-		if attempts == 1 {
-			return tgerr.New(420, "FLOOD_WAIT_2")
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if attempts != 2 {
-		t.Fatalf("attempts = %d, want 2", attempts)
-	}
-	if !reflect.DeepEqual(waits, []time.Duration{3 * time.Second}) {
-		t.Fatalf("waits = %v, want [3s]", waits)
-	}
-}
-
-func TestTDataWithFloodWaitStopsWhenContextIsDone(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	attempts := 0
-	err := tdataWithFloodWaitSleep(ctx, func(context.Context, time.Duration) error {
-		cancel()
-		return ctx.Err()
-	}, func(context.Context) error {
-		attempts++
-		return tgerr.New(420, "FLOOD_WAIT_2")
-	})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context canceled", err)
-	}
-	if attempts != 1 {
-		t.Fatalf("attempts = %d, want 1", attempts)
 	}
 }
 

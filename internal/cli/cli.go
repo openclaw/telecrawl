@@ -88,10 +88,6 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 }
 
 func (r *runtime) dispatch(args []string) error {
-	if hasHelpFlag(args[1:]) {
-		printUsage(r.stdout)
-		return nil
-	}
 	switch args[0] {
 	case "metadata":
 		return r.print(controlManifest())
@@ -120,15 +116,6 @@ func (r *runtime) dispatch(args []string) error {
 	default:
 		return usageErr(fmt.Errorf("unknown command %q", args[0]))
 	}
-}
-
-func hasHelpFlag(args []string) bool {
-	for _, arg := range args {
-		if arg == "--help" || arg == "-h" {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *runtime) withStore(fn func(*store.Store) error) error {
@@ -195,6 +182,7 @@ func (r *runtime) runImport(args []string) error {
 			MessagesLimit:           *messagesLimit,
 			ChatID:                  *chat,
 			FetchMedia:              *fetchMedia,
+			Progress:                r.stderr,
 			ExistingMediaSourcePath: existingMediaSourcePath,
 			ExistingMediaRefs:       existingMediaRefs,
 		}, st.Path())
