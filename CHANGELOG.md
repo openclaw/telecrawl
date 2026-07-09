@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3] - 2026-07-09
+
+### Fixed
+
+- Fix the documented `go install ...@latest` path: v0.3.2 module builds reported 0.3.1; tagged installs now resolve their version from Go module metadata.
+- Publish and verify GitHub release notes from the matching changelog section after GoReleaser uploads the release.
+
 ## [0.3.2] - 2026-07-09
 
 ### Changed

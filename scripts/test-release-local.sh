@@ -74,6 +74,17 @@ cat >"$tmp/bin/gh" <<'EOF'
 set -euo pipefail
 if [[ "${1:-}" == "auth" ]]; then
   printf '%s\n' test-token
+elif [[ "${1:-} ${2:-}" == "release edit" ]]; then
+  printf 'gh %s\n' "$*" >>"$RELEASE_TEST_LOG"
+  while [[ "$#" -gt 0 ]]; do
+    if [[ "$1" == "--notes-file" ]]; then
+      cp "$2" "$RELEASE_TEST_LOG.notes"
+      break
+    fi
+    shift
+  done
+elif [[ "${1:-}" == "api" ]]; then
+  cat "$RELEASE_TEST_LOG.notes"
 elif [[ "${1:-} ${2:-}" == "run list" ]]; then
   printf '%s\n' 42
 else
@@ -121,5 +132,6 @@ RELEASE_TEST_MODE=exact "$root/scripts/release-local"
 grep -Eq 'release-helper codesign-run -- goreleaser release --clean --parallelism=2 --release-notes /tmp/telecrawl-v0\.3\.2-notes\.' "$RELEASE_TEST_LOG"
 grep -Fq 'Update CrawlKit to the signed v0.13.4 release.' "$RELEASE_TEST_LOG"
 grep -Fq 'Full changelog: https://github.com/openclaw/telecrawl/blob/v0.3.2/CHANGELOG.md' "$RELEASE_TEST_LOG"
+grep -Fq 'gh release edit v0.3.2 --repo openclaw/telecrawl --notes-file' "$RELEASE_TEST_LOG"
 grep -Fq 'gh workflow run update-formula.yml' "$RELEASE_TEST_LOG"
 grep -Fq 'gh run watch 42' "$RELEASE_TEST_LOG"

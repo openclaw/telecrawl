@@ -100,6 +100,16 @@ fi
 
 "$release_helper" codesign-run -- goreleaser release --clean --parallelism=2 --release-notes "$notes_file"
 
+gh release edit "$tag" \
+  --repo openclaw/telecrawl \
+  --notes-file "$notes_file"
+expected_notes="$(<"$notes_file")"
+published_notes="$(gh api "repos/openclaw/telecrawl/releases/tags/$tag" --jq '.body // ""')"
+if [[ "$published_notes" != "$expected_notes" ]]; then
+  echo "release: published notes do not match CHANGELOG.md for $tag" >&2
+  exit 1
+fi
+
 request_id="telecrawl-${tag}-local-$(date +%s)"
 expected_title="Update telecrawl for ${tag} (${request_id})"
 gh workflow run update-formula.yml \
