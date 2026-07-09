@@ -127,6 +127,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Test local release contract
+        run: |
+          ./scripts/test-codesign-macos.sh
+          ./scripts/test-release-local.sh
+
       - name: Snapshot release build
         uses: goreleaser/goreleaser-action@v7.2.3
         with:

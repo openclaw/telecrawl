@@ -1,6 +1,15 @@
 # Changelog
 
-## [0.3.2] - Unreleased
+## [0.3.2] - 2026-07-09
+
+### Changed
+
+- Update CrawlKit to the signed v0.13.4 release.
+- Sign official macOS release binaries with the OpenClaw Foundation Developer ID through the managed local release keychain, while keeping CI, local development, and cross-platform snapshot builds credential-free.
+
+### Fixed
+
+- Build with Go 1.26.5 to fix reachable `crypto/tls` vulnerability GO-2026-5856 in official binaries.
 
 ## [0.3.1] - 2026-07-02
 

@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+
+if [[ "${1:-}" == "--check" ]]; then
+  if ! command -v goreleaser >/dev/null 2>&1; then
+    echo "release: missing required command: goreleaser" >&2
+    exit 1
+  fi
+  goreleaser check
+  ./scripts/test-codesign-macos.sh
+  ./scripts/test-release-local.sh
+  exit 0
+fi
+if [[ "$#" -ne 0 ]]; then
+  echo "usage: $0 [--check]" >&2
+  exit 2
+fi
+
+release_helper="${MAC_RELEASE_HELPER:-mac-release}"
+if ! release_helper="$(command -v "$release_helper")"; then
+  echo "release: install mac-release or set MAC_RELEASE_HELPER to the release-mac-app helper" >&2
+  exit 1
+fi
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "release: official releases require an authorized maintainer Mac" >&2
+  exit 1
+fi
+for command in git gh goreleaser; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    echo "release: missing required command: $command" >&2
+    exit 1
+  fi
+done
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "release: working tree must be clean" >&2
+  exit 1
+fi
+if [[ "$(git branch --show-current)" != "main" ]]; then
+  echo "release: releases must run from main" >&2
+  exit 1
+fi
+
+tag="$(git describe --tags --exact-match HEAD 2>/dev/null || true)"
+if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+  echo "release: HEAD must have an exact semantic version tag" >&2
+  exit 1
+fi
+if [[ "$(git cat-file -t "$tag")" != "tag" ]] || ! git verify-tag "$tag" >/dev/null 2>&1; then
+  echo "release: $tag must be an annotated, verifiable signed tag" >&2
+  exit 1
+fi
+
+local_tag_object="$(git rev-parse "refs/tags/$tag")"
+local_tag_commit="$(git rev-parse "$tag^{}")"
+head_commit="$(git rev-parse HEAD)"
+if [[ "$local_tag_commit" != "$head_commit" ]]; then
+  echo "release: $tag must peel to HEAD" >&2
+  exit 1
+fi
+if ! remote_tag_refs="$(git ls-remote --exit-code --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"; then
+  echo "release: push the signed $tag tag object to origin before publishing" >&2
+  exit 1
+fi
+remote_tag_object="$(awk -v ref="refs/tags/$tag" '$2 == ref { print $1 }' <<<"$remote_tag_refs")"
+remote_tag_commit="$(awk -v ref="refs/tags/$tag^{}" '$2 == ref { print $1 }' <<<"$remote_tag_refs")"
+if [[ "$remote_tag_object" != "$local_tag_object" || "$remote_tag_commit" != "$head_commit" ]]; then
+  echo "release: origin must contain the same signed $tag tag object, peeled to HEAD" >&2
+  exit 1
+fi
+
+notes_file="$(mktemp "/tmp/telecrawl-${tag}-notes.XXXXXX")"
+trap 'rm -f "$notes_file"' EXIT
+version="${tag#v}"
+if ! awk -v prefix="## [$version] - " '
+  index($0, prefix) == 1 { found = 1; next }
+  found && /^## \[/ { exit }
+  found { print }
+  END { if (!found) exit 1 }
+' CHANGELOG.md >"$notes_file"; then
+  echo "release: missing changelog section for $tag" >&2
+  exit 1
+fi
+if [[ ! -s "$notes_file" ]]; then
+  echo "release: empty changelog section for $tag" >&2
+  exit 1
+fi
+printf '\nFull changelog: https://github.com/openclaw/telecrawl/blob/%s/CHANGELOG.md\n' "$tag" >>"$notes_file"
+
+if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+  auth="$(gh auth token)"
+  GITHUB_TOKEN="$auth"
+  export GITHUB_TOKEN
+  unset auth
+fi
+
+"$release_helper" codesign-run -- goreleaser release --clean --parallelism=2 --release-notes "$notes_file"
+
+request_id="telecrawl-${tag}-local-$(date +%s)"
+expected_title="Update telecrawl for ${tag} (${request_id})"
+gh workflow run update-formula.yml \
+  --repo openclaw/homebrew-tap \
+  --ref main \
+  -f formula=telecrawl \
+  -f tag="$tag" \
+  -f repository=openclaw/telecrawl \
+  -f description="Telegram Desktop archive CLI with encrypted Git backups" \
+  -f artifact_template="{formula}_{version}_{target}.tar.gz" \
+  -f request_id="$request_id"
+
+run_id=""
+for _ in {1..30}; do
+  run_id="$(gh run list \
+    --repo openclaw/homebrew-tap \
+    --workflow update-formula.yml \
+    --branch main \
+    --event workflow_dispatch \
+    --limit 20 \
+    --json databaseId,displayTitle \
+    --jq ".[] | select(.displayTitle == \"$expected_title\") | .databaseId" | head -n1)"
+  if [[ -n "$run_id" ]]; then
+    break
+  fi
+  sleep 5
+done
+if [[ -z "$run_id" ]]; then
+  echo "release: could not find Homebrew tap run: $expected_title" >&2
+  exit 1
+fi
+
+gh run watch "$run_id" \
+  --repo openclaw/homebrew-tap \
+  --exit-status \
+  --interval 10
