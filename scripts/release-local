@@ -935,7 +935,7 @@ verify_draft() {
 publish_release() {
   local tag=$1 verifier_run accepted_release_id accepted_snapshot
   local accepted_tag_object accepted_tag_commit
-  local prepatch_record patch_response published_record
+  local prepatch_record publish_payload patch_response published_record
   validate_tag "$tag"
   require_tools git gh jq
   require_remote_signed_tag "$tag" false
@@ -966,9 +966,41 @@ publish_release() {
     "$prepatch_record" "$tag" true "$work_dir/prepublish-snapshot.json" "$accepted_snapshot"
   verify_release_notes "$tag" draft
 
+  # GitHub can rewrite a draft's tag_name to untagged-* for a partial PATCH.
+  # Send every canonical mutable release field together at publication.
+  publish_payload="$work_dir/publish-payload.json"
+  extract_notes "$tag"
+  jq -n \
+    --arg tag "$tag" \
+    --arg target_commitish "$accepted_tag_commit" \
+    --rawfile body "$notes_file" \
+    '{
+      tag_name: $tag,
+      target_commitish: $target_commitish,
+      name: $tag,
+      body: $body,
+      draft: false,
+      prerelease: false
+    }' > "$publish_payload"
+  jq -e \
+    --arg tag "$tag" \
+    --arg target_commitish "$accepted_tag_commit" \
+    --rawfile body "$notes_file" '
+      keys == ["body", "draft", "name", "prerelease", "tag_name", "target_commitish"] and
+      .tag_name == $tag and
+      .target_commitish == $target_commitish and
+      .name == $tag and
+      .body == $body and
+      .draft == false and
+      .prerelease == false
+    ' "$publish_payload" >/dev/null || {
+    echo "release: publication payload is not the canonical mutable release record" >&2
+    exit 1
+  }
+
   patch_response="$work_dir/publish-response.json"
   github_api --method PATCH "repos/$repository/releases/$accepted_release_id" \
-    -F draft=false > "$patch_response"
+    --input "$publish_payload" > "$patch_response"
   validate_release_record_file \
     "$patch_response" "$tag" false "$work_dir/publish-response-snapshot.json" "$accepted_snapshot"
   verify_release_notes "$tag" published

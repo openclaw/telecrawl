@@ -630,6 +630,18 @@ publish_function=$(sed -n '/^publish_release()/,/^}/p' "$root/scripts/release-lo
   echo "release-local does not verify notes before and after publication" >&2
   exit 1
 }
+grep -Fq 'publish_payload="$work_dir/publish-payload.json"' <<<"$publish_function"
+grep -Fq -- '--input "$publish_payload"' <<<"$publish_function"
+if grep -Fq -- '-F draft=false' <<<"$publish_function"; then
+  echo "release-local still uses a partial publication PATCH that can detach the release tag" >&2
+  exit 1
+fi
+for field in tag_name target_commitish name body draft prerelease; do
+  grep -Fq "$field" <<<"$publish_function" || {
+    echo "release-local publication payload omits $field" >&2
+    exit 1
+  }
+done
 [[ "$(grep -Fc 'github_api "repos/$repository/releases/$accepted_release_id"' <<<"$publish_function")" == 2 ]] || {
   echo "release-local does not GET the numeric release ID before and after publication" >&2
   exit 1
@@ -685,11 +697,14 @@ trusted_tag_commit=2222222222222222222222222222222222222222
 release_id=42
 release_snapshot_file=$work_dir/release-snapshot.json
 release_json='[]'
+notes_file=$work_dir/notes.md
 tag_check_count=0
+printf '%s\n' 'Tagged publish probe notes' > "$notes_file"
 
 validate_tag() { :; }
 require_tools() { :; }
 verify_release_notes() { :; }
+extract_notes() { notes_file=$work_dir/notes.md; }
 validate_release_record_file() { :; }
 release_record() {
   release_id=42
@@ -727,6 +742,25 @@ if PUBLISH_PROBE_ROOT="$tmp/publish-probe-root" \
 fi
 grep -Fq -- '--method PATCH' "$tmp/publish-probe.log" || {
   echo "publication tag-move regression did not reach the PATCH window" >&2
+  exit 1
+}
+grep -Fq -- '--input' "$tmp/publish-probe.log" || {
+  echo "publication tag-move regression did not use a JSON payload" >&2
+  exit 1
+}
+jq -e \
+  --arg tag v0.3.4 \
+  --arg target_commitish 2222222222222222222222222222222222222222 \
+  --rawfile body "$tmp/publish-probe-work/notes.md" '
+    keys == ["body", "draft", "name", "prerelease", "tag_name", "target_commitish"] and
+    .tag_name == $tag and
+    .target_commitish == $target_commitish and
+    .name == $tag and
+    .body == $body and
+    .draft == false and
+    .prerelease == false
+  ' "$tmp/publish-probe-work/publish-payload.json" >/dev/null || {
+  echo "publication regression did not preserve the canonical mutable release record" >&2
   exit 1
 }
 if grep -Fq 'release: published v0.3.4' "$tmp/publish-probe-output.log"; then

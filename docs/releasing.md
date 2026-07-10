@@ -100,7 +100,10 @@ state, and tagged notes by numeric-ID GET immediately before the PATCH, then
 requires both the PATCH response and a fresh numeric-ID GET to be the identical
 published record, then refetches the live signed tag and requires both its
 object and peeled commit to remain the verifier-accepted identity before
-reporting success. Publication also triggers a published-state verifier from
+reporting success. The PATCH always sends the six canonical mutable release
+fields together; partial release PATCHes are forbidden because GitHub can
+replace an omitted draft tag name with an `untagged-*` placeholder. Publication
+also triggers a published-state verifier from
 the release event. Before touching the
 tap, `homebrew` explicitly dispatches a fresh published-state verifier from the
 then-current protected default branch, so ordinary main advancement cannot
