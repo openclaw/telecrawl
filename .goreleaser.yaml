@@ -3,7 +3,7 @@ version: 2
 project_name: telecrawl
 
 changelog:
-  disable: true
+  disable: false
 
 release:
   draft: true

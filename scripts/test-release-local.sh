@@ -528,6 +528,7 @@ assert_release_record_rejected replaced-name '.assets[0].name = "replacement"'
 assert_release_record_rejected release-id '.id = 43'
 
 grep -A2 '^release:' "$root/.goreleaser.yaml" | grep -Fq 'draft: true'
+grep -A1 '^changelog:' "$root/.goreleaser.yaml" | grep -Fq 'disable: false'
 grep -Fq 'name_template: "{{ .Tag }}"' "$root/.goreleaser.yaml"
 grep -Fq 'target_commitish: "{{ .Commit }}"' "$root/.goreleaser.yaml"
 [[ "$(grep -Fc 'env: &release_build_env' "$root/.goreleaser.yaml")" == 1 &&
