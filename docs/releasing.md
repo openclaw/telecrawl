@@ -88,7 +88,9 @@ selector; release-tag code is never executed. Static archive, build-info,
 signature, notarization, reproducible-rebuild, frozen-hash, and protected-helper
 cleanliness checks all finish before the matching native candidate is run as
 the workflow's final isolated, token-free operation. No later trust decision
-depends on state writable by that candidate.
+depends on state writable by that candidate. The proof checker requires one
+exact marker line in each native job's final-step log; prefixes, suffixes, and
+GitHub's duplicate combined job logs are not accepted as independent proof.
 
 `publish` requires a successful two-architecture draft verifier run at the
 current default-branch SHA, created strictly after the newest draft asset, and

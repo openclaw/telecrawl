@@ -19,7 +19,7 @@ fi
   echo "release verifier: GITHUB_REPOSITORY must be $repository" >&2
   exit 1
 }
-for tool in gh jq mktemp unzip; do
+for tool in gh grep jq mktemp unzip; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "release verifier: missing required command: $tool" >&2
     exit 1
@@ -200,12 +200,26 @@ for arch in arm64 x86_64; do
 done
 
 github_api "repos/$repository/actions/runs/$run_id/logs" > "$work_dir/run-logs.zip"
-unzip -p "$work_dir/run-logs.zip" > "$work_dir/run-logs.txt"
+unzip -Z1 "$work_dir/run-logs.zip" > "$work_dir/run-log-entries.txt"
 proof_marker="TELECRAWL_RELEASE_PROOF tag=$tag object=$expected_tag_object commit=$expected_tag_commit workflow=$default_sha state=$expected_state"
-marker_count=$(awk -v marker="$proof_marker" 'index($0, marker) { count++ } END { print count + 0 }' "$work_dir/run-logs.txt")
-[[ "$marker_count" == 2 ]] || {
-  echo "release verifier: native jobs are not bound to the exact signed tag object" >&2
-  exit 1
-}
+for arch in arm64 x86_64; do
+  step_log="Verify notarized macOS archive ($arch)/6_Execute verified candidate last.txt"
+  [[ "$(grep -Fxc -- "$step_log" "$work_dir/run-log-entries.txt")" == 1 ]] || {
+    echo "release verifier: missing exact final-step log for $arch" >&2
+    exit 1
+  }
+  unzip -p "$work_dir/run-logs.zip" "$step_log" > "$work_dir/run-log-$arch.txt"
+  marker_count=$(awk -v marker="$proof_marker" '
+    {
+      separator = index($0, " ")
+      if (separator > 0 && substr($0, separator + 1) == marker) count++
+    }
+    END { print count + 0 }
+  ' "$work_dir/run-log-$arch.txt")
+  [[ "$marker_count" == 1 ]] || {
+    echo "release verifier: $arch job is not bound to the exact signed tag object" >&2
+    exit 1
+  }
+done
 
 printf '%s\n' "$run_id"

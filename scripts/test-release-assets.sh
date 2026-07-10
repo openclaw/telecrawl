@@ -691,18 +691,44 @@ cat > "$tmp/jobs.json" <<'EOF'
 EOF
 export MOCK_GH_RUNS_JSON="$tmp/runs.json"
 export MOCK_GH_JOBS_JSON="$tmp/jobs.json"
+mock_log_timestamp=2026-07-09T12:01:00.0000000Z
 write_run_logs() {
   local state=$1 object=${2:-$tag_object} workflow=${3:-0123456789abcdef0123456789abcdef01234567}
-  printf '%s\n%s\n' \
-    "TELECRAWL_RELEASE_PROOF tag=$tag object=$object commit=$tag_commit workflow=$workflow state=$state" \
-    "TELECRAWL_RELEASE_PROOF tag=$tag object=$object commit=$tag_commit workflow=$workflow state=$state" \
-    > "$tmp/run.log"
-  rm -f "$tmp/run-logs.zip"
-  (cd "$tmp" && zip -q run-logs.zip run.log)
+  local arch index proof step_log
+  proof="TELECRAWL_RELEASE_PROOF tag=$tag object=$object commit=$tag_commit workflow=$workflow state=$state"
+  rm -rf "$tmp/run-logs" "$tmp/run-logs.zip"
+  mkdir -p "$tmp/run-logs"
+  index=0
+  for arch in arm64 x86_64; do
+    mkdir -p "$tmp/run-logs/Verify notarized macOS archive ($arch)"
+    step_log="$tmp/run-logs/Verify notarized macOS archive ($arch)/6_Execute verified candidate last.txt"
+    printf '%s %s\n' "$mock_log_timestamp" "$proof" > "$step_log"
+    printf '%s %s\n' "$mock_log_timestamp" "$proof" > "$tmp/run-logs/${index}_Verify notarized macOS archive ($arch).txt"
+    index=$((index + 1))
+  done
+  (cd "$tmp/run-logs" && zip -qr "$tmp/run-logs.zip" .)
   export MOCK_GH_LOGS_ZIP="$tmp/run-logs.zip"
 }
 write_run_logs draft
 [[ "$(GITHUB_REPOSITORY=openclaw/telecrawl "$root/scripts/check-release-verifier.sh" "$tag" true "$tag_commit" "$tag_object")" == 42 ]] || fail "native verifier proof was not recognized"
+rm "$tmp/run-logs/Verify notarized macOS archive (arm64)/6_Execute verified candidate last.txt"
+rm "$tmp/run-logs.zip"
+(cd "$tmp/run-logs" && zip -qr "$tmp/run-logs.zip" .)
+if GITHUB_REPOSITORY=openclaw/telecrawl \
+  "$root/scripts/check-release-verifier.sh" "$tag" true "$tag_commit" "$tag_object" >/dev/null 2>&1; then
+  fail "combined job log substituted for the exact native final-step proof"
+fi
+write_run_logs draft
+duplicate_proof="TELECRAWL_RELEASE_PROOF tag=$tag object=$tag_object commit=$tag_commit workflow=0123456789abcdef0123456789abcdef01234567 state=draft"
+printf '%s %s%s\n' "$mock_log_timestamp" "$duplicate_proof" "$duplicate_proof" \
+  > "$tmp/run-logs/Verify notarized macOS archive (arm64)/6_Execute verified candidate last.txt"
+rm "$tmp/run-logs.zip"
+(cd "$tmp/run-logs" && zip -qr "$tmp/run-logs.zip" .)
+if GITHUB_REPOSITORY=openclaw/telecrawl \
+  "$root/scripts/check-release-verifier.sh" "$tag" true "$tag_commit" "$tag_object" >/dev/null 2>&1; then
+  fail "same-line duplicate native proof marker was accepted"
+fi
+write_run_logs draft
 if GITHUB_REPOSITORY=attacker/telecrawl \
   "$root/scripts/check-release-verifier.sh" "$tag" true "$tag_commit" "$tag_object" >/dev/null 2>&1; then
   fail "verifier checker accepted an attacker-controlled repository override"
