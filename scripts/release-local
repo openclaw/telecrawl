@@ -830,7 +830,7 @@ pilot_release() {
 
 dispatch_verifier() {
   local tag=$1 expected_draft=$2 repo_json default_branch default_sha state run_title latest_asset_time run_id expected_tag_commit expected_tag_object
-  local workflow_json workflow_id run_query preexisting_run_ids dispatch_payload dispatch_response run_record run_record_ready checked_run
+  local workflow_json workflow_id run_query preexisting_run_ids dispatch_payload dispatch_response run_record run_record_ready validation_error checked_run
   validate_tag "$tag"
   [[ "$expected_draft" == true || "$expected_draft" == false ]] || {
     echo "release: verifier draft state must be true or false" >&2
@@ -899,24 +899,27 @@ dispatch_verifier() {
     tostring
   ' "$dispatch_response")
   run_record="$work_dir/verifier-dispatched-run.json"
+  validation_error="$work_dir/verifier-dispatch-validation-error.txt"
   run_record_ready=false
   for _ in {1..15}; do
     if github_api \
       -H 'X-GitHub-Api-Version: 2026-03-10' \
-      "repos/$repository/actions/runs/$run_id" > "$run_record"; then
+      "repos/$repository/actions/runs/$run_id" > "$run_record" &&
+      checked_run=$("$root/scripts/validate-verifier-dispatch.sh" \
+        "$dispatch_response" "$preexisting_run_ids" "$run_record" \
+        "$workflow_id" "$run_title" "$default_branch" "$default_sha" \
+        "$latest_asset_time" 2> "$validation_error"); then
+      run_id=$checked_run
       run_record_ready=true
       break
     fi
     sleep 2
   done
   [[ "$run_record_ready" == true ]] || {
-    echo "release: returned verifier run ID was not readable" >&2
+    [[ ! -s "$validation_error" ]] || cat "$validation_error" >&2
+    echo "release: returned verifier run ID did not materialize as the protected request" >&2
     exit 1
   }
-  run_id=$("$root/scripts/validate-verifier-dispatch.sh" \
-    "$dispatch_response" "$preexisting_run_ids" "$run_record" \
-    "$workflow_id" "$run_title" "$default_branch" "$default_sha" \
-    "$latest_asset_time")
   gh run watch "$run_id" --repo "github.com/$repository" --exit-status --interval 10
   require_remote_signed_tag "$tag" false
   checked_run=$("$root/scripts/check-release-verifier.sh" \

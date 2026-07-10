@@ -61,10 +61,11 @@ Homebrew.
 current default branch through the versioned `2026-03-10` REST endpoint. It
 requires the response's exact `workflow_run_id` and URLs, proves that ID did not
 exist before the request, validates that exact run record including canonical
-plain path `.github/workflows/release-assets.yml`, watches that same ID,
-and requires the general newest-proof checker to return the same ID. A
-concurrent matching dispatch therefore cannot be substituted by title or
-timing. The workflow fetches verifier code from that protected
+plain path `.github/workflows/release-assets.yml`, and retries full validation
+of that same ID while GitHub materializes the run record. It then watches that
+ID and requires the general newest-proof checker to return it. A concurrent
+matching dispatch therefore cannot be substituted by title or timing. The
+workflow fetches verifier code from that protected
 branch without a token, anonymously fetches the annotated tag as data, and
 forces its SSH signature through the same repository-owned allowed-signers
 policy and exact principal/key check used locally. The protected run title is

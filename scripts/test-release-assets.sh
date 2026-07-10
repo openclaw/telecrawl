@@ -55,6 +55,18 @@ grep -Fq 'Accept: application/octet-stream' "$root/scripts/download-release-asse
 grep -Fq "X-GitHub-Api-Version: 2026-03-10" "$root/scripts/release-local" || fail "verifier dispatch does not pin the response-bearing API version"
 grep -Fq '.workflow_run_id' "$root/scripts/release-local" || fail "verifier dispatch does not consume the returned exact run ID"
 grep -Fq 'validate-verifier-dispatch.sh' "$root/scripts/release-local" || fail "verifier dispatch response is not independently validated"
+dispatch_function=$(sed -n '/^dispatch_verifier()/,/^}/p' "$root/scripts/release-local")
+dispatch_poll=$(sed -n '/for _ in {1..15}/,/done/p' <<<"$dispatch_function")
+grep -Fq 'checked_run=$("$root/scripts/validate-verifier-dispatch.sh"' <<<"$dispatch_poll" || \
+  fail "verifier dispatch does not retry exact-record validation during GitHub materialization"
+grep -Fq 'run_id=$checked_run' <<<"$dispatch_poll" || \
+  fail "verifier dispatch does not retain the validated returned run ID"
+validator_line=$(grep -nF 'checked_run=$("$root/scripts/validate-verifier-dispatch.sh"' <<<"$dispatch_poll" | cut -d: -f1)
+break_line=$(grep -nF 'break' <<<"$dispatch_poll" | cut -d: -f1)
+[[ "$validator_line" -lt "$break_line" ]] || \
+  fail "verifier dispatch stops polling before the returned record validates"
+[[ "$(grep -Fc 'validate-verifier-dispatch.sh' <<<"$dispatch_function")" == 1 ]] || \
+  fail "verifier dispatch validates outside the exact returned-record polling loop"
 for github_script in \
   "$root/scripts/release-local" \
   "$root/scripts/check-release-verifier.sh" \
