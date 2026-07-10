@@ -558,6 +558,12 @@ for go_env in \
 done
 prepare_go_function=$(sed -n '/^prepare_official_go_environment()/,/^}/p' "$root/scripts/release-local")
 grep -Fq 'ambient Go build control is forbidden' <<<"$prepare_go_function"
+workflow_release_tests=$(grep -R -F 'test-release-local.sh' "$root/.github/workflows")
+[[ -n "$workflow_release_tests" ]]
+if grep -Fv 'env -u GOTOOLCHAIN ./scripts/test-release-local.sh' <<<"$workflow_release_tests" | grep -q .; then
+  echo "workflow invokes the local release test with ambient Go build controls" >&2
+  exit 1
+fi
 grep -Fq 'go version go1.26.5 darwin/$expected_goarch' <<<"$prepare_go_function"
 grep -Fq 'GO111MODULE' <<<"$prepare_go_function"
 grep -Fq 'GOAUTH' <<<"$prepare_go_function"

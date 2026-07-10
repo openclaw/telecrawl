@@ -29,7 +29,7 @@ jobs:
         run: |
           ./scripts/test-codesign-macos.sh
           ./scripts/test-release-assets.sh
-          ./scripts/test-release-local.sh
+          env -u GOTOOLCHAIN ./scripts/test-release-local.sh
 
       - name: Snapshot release build
         uses: goreleaser/goreleaser-action@v7.2.3
