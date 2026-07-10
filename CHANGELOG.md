@@ -2,6 +2,14 @@
 
 ## [0.3.4] - Unreleased
 
+### Changed
+
+- Notarize every official macOS release binary with the OpenClaw Foundation Developer ID and verify exact signing metadata, the canonical designated requirement, strict code validity, and online notarization before GoReleaser archives it.
+- Create releases as drafts, require independent native Apple Silicon and Intel verification before publication, then require a distinct published-release verifier before Homebrew updates.
+- Pin signed release tags to the repository release key and exact tag object/commit, bind every binary-only platform archive to the exact Go main package, toolchain, target, and tag revision, reproducibly rebuild non-Darwin payloads, and source publish notes from the revalidated tag at each release gate.
+- Bind publication and Homebrew handoff bytes to the verifier-accepted numeric release record and exact asset IDs, names, sizes, and digests, then require the generic tap run and commit provenance to match the protected source exactly.
+- Reject ambient Go build controls and executable hooks in official builds, pin verifier API reads to the Telecrawl repository, and run native candidates only after frozen static, reproducible-rebuild, and protected-helper proof completes.
+
 ## [0.3.3] - 2026-07-09
 
 ### Fixed

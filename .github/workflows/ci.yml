@@ -130,6 +130,7 @@ jobs:
       - name: Test local release contract
         run: |
           ./scripts/test-codesign-macos.sh
+          ./scripts/test-release-assets.sh
           ./scripts/test-release-local.sh
 
       - name: Snapshot release build

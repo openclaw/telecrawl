@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/.." && pwd)"
-tmp="$(mktemp -d)"
+root=$(cd "$(dirname "$0")/.." && pwd)
+tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-
-mkdir -p "$tmp/bin"
-binary="$tmp/telecrawl"
-touch "$binary"
+mkdir -p "$tmp/bin" "$tmp/dist"
+binary="$tmp/dist/telecrawl"
+log="$tmp/release.log"
 
 cat > "$tmp/bin/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -17,33 +16,183 @@ EOF
 cat > "$tmp/bin/codesign" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${1:-}" == "--display" ]]; then
-  printf 'TeamIdentifier=%s\n' "${FAKE_TEAM_ID:-}" >&2
+printf 'codesign %s\n' "$*" >> "$RELEASE_TEST_LOG"
+if [[ " $* " == *' --display '* ]]; then
+  {
+    printf 'Identifier=%s\n' "${MOCK_IDENTIFIER:-ai.openclaw.telecrawl}"
+    printf 'CodeDirectory v=20500 size=100 flags=%s hashes=1+0 location=embedded\n' "${MOCK_CODE_FLAGS:-0x10000(runtime)}"
+    printf 'Authority=%s\n' "${MOCK_AUTHORITY:-Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)}"
+    printf 'Authority=Developer ID Certification Authority\n'
+    printf 'Authority=Apple Root CA\n'
+    printf 'Timestamp=%s\n' "${MOCK_TIMESTAMP:-09.07.2026 at 12:07:29}"
+    printf 'TeamIdentifier=%s\n' "${MOCK_TEAM_ID:-FWJYW4S8P8}"
+    printf 'Runtime Version=%s\n' "${MOCK_RUNTIME_VERSION:-12.0.0}"
+  } >&2
   exit 0
 fi
-printf '%s\n' "$*" >> "$CODESIGN_LOG"
+if [[ " $* " == *' -d '* && " $* " == *' -r- '* ]]; then
+  echo 'Executable=/tmp/telecrawl' >&2
+  printf 'designated => %s\n' "${MOCK_EMBEDDED_REQUIREMENT:-identifier \"ai.openclaw.telecrawl\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = FWJYW4S8P8}" >&2
+  exit 0
+fi
+if [[ " $* " == *' --sign '* ]]; then
+  for arg in "$@"; do target=$arg; done
+  printf '\nsigned\n' >> "$target"
+fi
+if [[ " $* " == *' --check-notarization '* && "${MOCK_NOTARIZATION_REQUIREMENT_REJECT:-0}" == 1 ]]; then
+  exit 3
+fi
+[[ "${MOCK_CODESIGN_VERIFY_REJECT:-0}" != 1 ]]
 EOF
 
-chmod +x "$tmp/bin/uname" "$tmp/bin/codesign"
+cat > "$tmp/bin/ditto" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+previous=
+for arg in "$@"; do
+  source=$previous
+  previous=$arg
+done
+destination=$previous
+cp "$source" "$destination"
+printf 'ditto %s\n' "$*" >> "$RELEASE_TEST_LOG"
+EOF
+
+cat > "$tmp/bin/xcrun" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'xcrun %s\n' "$*" >> "$RELEASE_TEST_LOG"
+[[ "${MOCK_NOTARY_REJECT:-0}" != 1 ]] || exit 1
+printf '{"id":"12345678-1234-1234-1234-123456789abc","status":"%s"}\n' "${MOCK_NOTARY_STATUS:-Accepted}"
+EOF
+
+cat > "$tmp/bin/plutil" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${2:-}" in
+  status) printf '%s\n' "${MOCK_NOTARY_STATUS:-Accepted}" ;;
+  id) printf '%s\n' '12345678-1234-1234-1234-123456789abc' ;;
+  *) exit 1 ;;
+esac
+EOF
+
+chmod +x "$tmp/bin/"*
 export PATH="$tmp/bin:$PATH"
-export CODESIGN_LOG="$tmp/codesign.log"
-unset TELECRAWL_CODESIGN_IDENTITY CODESIGN_IDENTITY
+export RELEASE_TEST_LOG="$log"
 
+reset_binary() {
+  printf 'unsigned-binary\n' > "$binary"
+  original_hash=$(shasum -a 256 "$binary" | awk '{print $1}')
+  : > "$log"
+  unset MOCK_IDENTIFIER MOCK_AUTHORITY MOCK_TEAM_ID MOCK_TIMESTAMP
+  unset MOCK_CODE_FLAGS MOCK_RUNTIME_VERSION MOCK_CODESIGN_VERIFY_REJECT
+  unset MOCK_NOTARY_REJECT MOCK_NOTARY_STATUS MOCK_NOTARIZATION_REQUIREMENT_REJECT
+  unset MOCK_EMBEDDED_REQUIREMENT
+}
+
+assert_unchanged() {
+  [[ "$(shasum -a 256 "$binary" | awk '{print $1}')" == "$original_hash" ]] || {
+    echo "codesign test: failed release mutated the GoReleaser artifact" >&2
+    exit 1
+  }
+}
+
+reset_binary
+unset TELECRAWL_OFFICIAL_RELEASE CODESIGN_IDENTITY CODESIGN_KEYCHAIN
+unset MAC_RELEASE_CODESIGN_KEYCHAIN NOTARYTOOL_KEYCHAIN_PROFILE
 "$root/scripts/codesign-macos.sh" "$binary"
-if [[ -e "$CODESIGN_LOG" ]]; then
-  echo "codesign hook ran without an identity" >&2
+assert_unchanged
+[[ ! -s "$log" ]] || {
+  echo "codesign test: ordinary build used release credentials" >&2
+  exit 1
+}
+
+export TELECRAWL_OFFICIAL_RELEASE=1
+export CODESIGN_IDENTITY='Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)'
+export CODESIGN_KEYCHAIN=/tmp/foundation-release.keychain-db
+export MAC_RELEASE_CODESIGN_KEYCHAIN=$CODESIGN_KEYCHAIN
+
+reset_binary
+unset NOTARYTOOL_KEYCHAIN_PROFILE
+if "$root/scripts/codesign-macos.sh" "$binary" >/dev/null 2>&1; then
+  echo "codesign test: official release accepted a missing notary profile" >&2
+  exit 1
+fi
+assert_unchanged
+
+reset_binary
+export NOTARYTOOL_KEYCHAIN_PROFILE=test-profile
+export CODESIGN_IDENTITY='Developer ID Application: Wrong Identity (WRONGTEAM1)'
+if "$root/scripts/codesign-macos.sh" "$binary" >/dev/null 2>&1; then
+  echo "codesign test: official release accepted the wrong identity" >&2
+  exit 1
+fi
+assert_unchanged
+
+reset_binary
+export CODESIGN_IDENTITY='Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)'
+export MOCK_NOTARY_REJECT=1
+if "$root/scripts/codesign-macos.sh" "$binary" >/dev/null 2>&1; then
+  echo "codesign test: official release accepted notary rejection" >&2
+  exit 1
+fi
+assert_unchanged
+
+reset_binary
+export MOCK_NOTARY_STATUS=Invalid
+if "$root/scripts/codesign-macos.sh" "$binary" >/dev/null 2>&1; then
+  echo "codesign test: official release accepted Invalid notarization status" >&2
+  exit 1
+fi
+assert_unchanged
+
+reset_binary
+export MOCK_IDENTIFIER=org.example.wrong
+if "$root/scripts/codesign-macos.sh" "$binary" >/dev/null 2>&1; then
+  echo "codesign test: official release accepted the wrong identifier" >&2
+  exit 1
+fi
+assert_unchanged
+
+reset_binary
+canonical_dr='identifier "ai.openclaw.telecrawl" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = FWJYW4S8P8'
+for embedded_dr in \
+  'identifier "org.example.wrong" and anchor apple generic' \
+  "$canonical_dr and info[CFBundleVersion] = \"1\"" \
+  'cdhash H"0123456789abcdef0123456789abcdef01234567"'; do
+  export MOCK_EMBEDDED_REQUIREMENT=$embedded_dr
+  if "$root/scripts/codesign-macos.sh" "$binary" >/dev/null 2>&1; then
+    echo "codesign test: official release accepted a noncanonical embedded designated requirement" >&2
+    exit 1
+  fi
+  assert_unchanged
+  reset_binary
+done
+
+reset_binary
+export MOCK_NOTARIZATION_REQUIREMENT_REJECT=1
+if "$root/scripts/codesign-macos.sh" "$binary" >/dev/null 2>&1; then
+  echo "codesign test: official release accepted a missing codesign notarization ticket" >&2
+  exit 1
+fi
+assert_unchanged
+
+reset_binary
+"$root/scripts/codesign-macos.sh" "$binary"
+[[ "$(shasum -a 256 "$binary" | awk '{print $1}')" != "$original_hash" ]] || {
+  echo "codesign test: successful official release did not install the signed candidate" >&2
+  exit 1
+}
+grep -Fq -- '--timestamp --options runtime --identifier ai.openclaw.telecrawl' "$log"
+grep -Fq -- 'notarytool submit' "$log"
+grep -Fq -- '--keychain-profile test-profile --no-s3-acceleration --wait --output-format json' "$log"
+grep -Fq -- '--verify --strict -R=identifier "ai.openclaw.telecrawl"' "$log"
+grep -Fq -- 'codesign -d -r-' "$log"
+grep -Fq -- '--verify --strict --check-notarization -R=notarized' "$log"
+grep -Fq "codesign --verify --strict --check-notarization -R='notarized'" "$root/scripts/codesign-macos.sh"
+if find "$tmp/dist" -maxdepth 1 -name '.telecrawl-notary.*' | grep -q .; then
+  echo "codesign test: ephemeral notarization files were not removed" >&2
   exit 1
 fi
 
-export TELECRAWL_CODESIGN_IDENTITY="Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)"
-export FAKE_TEAM_ID="FWJYW4S8P8"
-"$root/scripts/codesign-macos.sh" "$binary"
-grep -Fq -- "--options runtime --identifier ai.openclaw.telecrawl $binary" "$CODESIGN_LOG"
-grep -Fq -- "--verify --strict --verbose=2 $binary" "$CODESIGN_LOG"
-
-export FAKE_TEAM_ID="WRONGTEAM1"
-if "$root/scripts/codesign-macos.sh" "$binary" 2> "$tmp/wrong-team.err"; then
-  echo "codesign hook accepted the wrong Team ID" >&2
-  exit 1
-fi
-grep -Fq "expected OpenClaw Foundation Team ID FWJYW4S8P8" "$tmp/wrong-team.err"
+echo "codesign/notarization tests passed"

@@ -24,11 +24,17 @@ brew tap steipete/tap
 brew install telecrawl
 ```
 
+Official Homebrew macOS binaries are signed with the OpenClaw Foundation
+Developer ID and notarized by Apple before publication. Source builds and
+cross-platform snapshots remain credential-free.
+
 Or install with Go:
 
 ```bash
 go install github.com/openclaw/telecrawl/cmd/telecrawl@latest
 ```
+
+Maintainer release gates are documented in [docs/releasing.md](docs/releasing.md).
 
 ### Docker
 

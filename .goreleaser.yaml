@@ -5,12 +5,41 @@ project_name: telecrawl
 changelog:
   disable: true
 
+release:
+  draft: true
+  name_template: "{{ .Tag }}"
+  target_commitish: "{{ .Commit }}"
+
+snapshot:
+  version_template: '{{ if index .Env "TELECRAWL_PILOT_VERSION" }}{{ index .Env "TELECRAWL_PILOT_VERSION" }}{{ else }}{{ .Version }}-SNAPSHOT-{{ .ShortCommit }}{{ end }}'
+
 builds:
   - id: telecrawl
     main: ./cmd/telecrawl
     binary: telecrawl
-    env:
+    flags:
+      - -trimpath
+    env: &release_build_env
       - CGO_ENABLED=0
+      - "GOCACHEPROG="
+      - "GODEBUG="
+      - GO111MODULE=on
+      - GOAUTH=off
+      - GOENV=off
+      - "GOEXPERIMENT="
+      - "GOFLAGS="
+      - GOFIPS140=off
+      - "GOINSECURE="
+      - GOAMD64=v1
+      - GOARM64=v8.0
+      - "GONOPROXY="
+      - "GONOSUMDB="
+      - "GOPRIVATE="
+      - GOPROXY=https://proxy.golang.org
+      - "GOROOT="
+      - GOSUMDB=sum.golang.org
+      - GOTOOLCHAIN=local
+      - GOWORK=off
     ldflags:
       - -s -w -X github.com/openclaw/telecrawl/internal/cli.version={{ .Version }}
     targets:
@@ -21,8 +50,9 @@ builds:
   - id: telecrawl_darwin
     main: ./cmd/telecrawl
     binary: telecrawl
-    env:
-      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    env: *release_build_env
     ldflags:
       - -s -w -X github.com/openclaw/telecrawl/internal/cli.version={{ .Version }}
     targets:
@@ -36,6 +66,8 @@ archives:
   - ids:
       - telecrawl
       - telecrawl_darwin
+    files:
+      - "none*"
     formats:
       - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
