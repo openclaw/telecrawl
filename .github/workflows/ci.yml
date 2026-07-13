@@ -37,7 +37,7 @@ jobs:
           go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
           go install mvdan.cc/gofumpt@v0.10.0
           go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
-          go install golang.org/x/tools/cmd/deadcode@v0.47.0
+          go install golang.org/x/tools/cmd/deadcode@v0.48.0
 
       - name: Vet
         run: go vet ./...
