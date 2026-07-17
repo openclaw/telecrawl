@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -335,11 +337,12 @@ func TestMessagesToleratesNullableOptionalFields(t *testing.T) {
 	}
 }
 
-func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
+func TestMergeAllPreservesHistoryOutsideImportWindow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, 5, 9, 3, 17, 53, 0, time.UTC)
 	later := now.Add(time.Hour)
+	sourcePath := t.TempDir()
 
 	st := openTestStore(t, filepath.Join(t.TempDir(), "upsert.db"))
 
@@ -353,7 +356,7 @@ func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 	msgB1 := Message{SourcePK: 2, ChatJID: "-1002", ChatName: "Chat B", MessageID: "1", SenderJID: "20", SenderName: "Bob", Timestamp: now, Text: "hello b1", MessageType: "Message"}
 	msgB2 := Message{SourcePK: 3, ChatJID: "-1002", ChatName: "Chat B", MessageID: "2", SenderJID: "20", SenderName: "Bob", Timestamp: later, Text: "hello b2", MessageType: "Message"}
 
-	initial := ImportStats{SourcePath: "tdata", DBPath: st.Path(), Chats: 2, Messages: 3, StartedAt: now, FinishedAt: now}
+	initial := ImportStats{SourcePath: sourcePath, SourcePathCanonical: true, SourceIdentity: "test:source", DBPath: st.Path(), Chats: 2, Messages: 3, StartedAt: now, FinishedAt: now}
 	if err := st.ReplaceAll(
 		ctx, initial,
 		nil,
@@ -369,9 +372,9 @@ func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 	updatedChatA := Chat{JID: "-1001", Kind: "channel", Name: "Chat A Updated", LastMessageAt: later, UnreadCount: 5, MessageCount: 1, Forum: false}
 	updatedMsgA := Message{SourcePK: 4, ChatJID: "-1001", ChatName: "Chat A Updated", MessageID: "2", SenderJID: "10", SenderName: "Alice", Timestamp: later, Text: "updated a", MessageType: "Message", MediaType: "photo", MediaTitle: "pic.jpg"}
 
-	upsertStats := ImportStats{SourcePath: "tdata", DBPath: st.Path(), Chats: 1, Messages: 1, MediaMessages: 1, StartedAt: later, FinishedAt: later}
-	if err := st.UpsertChat(
-		ctx, upsertStats, "-1001",
+	mergeStats := ImportStats{SourcePath: sourcePath, SourcePathCanonical: true, SourceIdentity: "test:source", DBPath: st.Path(), Chats: 1, Messages: 1, MediaMessages: 1, StartedAt: later, FinishedAt: later}
+	if err := st.MergeAll(
+		ctx, mergeStats,
 		nil,
 		[]Chat{updatedChatA},
 		nil, nil,
@@ -388,8 +391,8 @@ func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 	if status.Chats != 2 {
 		t.Fatalf("chats = %d, want 2 (chat B preserved)", status.Chats)
 	}
-	if status.Messages != 3 {
-		t.Fatalf("messages = %d, want 3 (2 from B + 1 updated A)", status.Messages)
+	if status.Messages != 4 {
+		t.Fatalf("messages = %d, want 4 (all older messages preserved)", status.Messages)
 	}
 	if status.MediaMessages != 1 {
 		t.Fatalf("media_messages = %d, want 1", status.MediaMessages)
@@ -413,13 +416,19 @@ func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 			if c.Name != "Chat A Updated" {
 				t.Fatalf("chat A name = %q, want %q", c.Name, "Chat A Updated")
 			}
-			if c.FolderID != "1" {
-				t.Fatalf("chat A folder_id = %q, want preserved folder 1", c.FolderID)
+			if c.FolderID != "" {
+				t.Fatalf("chat A folder_id = %q, want cleared", c.FolderID)
+			}
+			if c.MessageCount != 2 {
+				t.Fatalf("chat A message_count = %d, want 2 retained rows", c.MessageCount)
 			}
 		case "-1002":
 			foundB = true
 			if c.Name != "Chat B" {
 				t.Fatalf("chat B name = %q, want %q", c.Name, "Chat B")
+			}
+			if c.MessageCount != 2 {
+				t.Fatalf("chat B message_count = %d, want 2", c.MessageCount)
 			}
 		}
 	}
@@ -431,8 +440,11 @@ func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(msgAAll) != 1 || msgAAll[0].Text != "updated a" {
-		t.Fatalf("chat A messages = %d (text=%q), want 1 (updated a)", len(msgAAll), msgAAll[0].Text)
+	if len(msgAAll) != 2 {
+		t.Fatalf("chat A messages = %d, want 2 (older + updated)", len(msgAAll))
+	}
+	if msgAAll[0].Text != "updated a" || msgAAll[1].Text != "hello a" {
+		t.Fatalf("chat A messages = %#v, want updated and older messages", msgAAll)
 	}
 
 	msgBAll, err := st.Messages(ctx, MessageFilter{ChatJID: "-1002", Limit: 10})
@@ -455,8 +467,8 @@ func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fcsA) != 1 || fcsA[0].JID != "-1001" {
-		t.Fatalf("folder 1 chats = %v, want chat A preserved", fcsA)
+	if len(fcsA) != 0 {
+		t.Fatalf("folder 1 chats = %v, want imported chat A removed", fcsA)
 	}
 
 	fcs, err := st.ChatsInFolder(ctx, "2", 10)
@@ -487,15 +499,215 @@ func TestUpsertChatPreservesUnrelatedChats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(searchOld) != 0 {
-		t.Fatalf("FTS 'hello a' in chat A = %d, want 0 (old FTS removed)", len(searchOld))
+	if len(searchOld) != 1 {
+		t.Fatalf("FTS 'hello a' in chat A = %d, want 1 (old FTS preserved)", len(searchOld))
 	}
 
-	var sourcePath string
-	if err := st.db.QueryRowContext(ctx, `select value from sync_state where key='source_path'`).Scan(&sourcePath); err != nil {
+	var storedSourcePath string
+	if err := st.db.QueryRowContext(ctx, `select value from sync_state where key='source_path'`).Scan(&storedSourcePath); err != nil {
 		t.Fatal(err)
 	}
-	if sourcePath != "tdata" {
-		t.Fatalf("source_path = %q, want %q", sourcePath, "tdata")
+	if storedSourcePath != mergeStats.SourcePath {
+		t.Fatalf("source_path = %q, want %q", storedSourcePath, mergeStats.SourcePath)
+	}
+}
+
+func TestMergeAllRejectsDifferentSource(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	st := openTestStore(t, filepath.Join(t.TempDir(), "source-guard.db"))
+	sourceA := t.TempDir()
+	sourceB := sourceA
+	chat := Chat{JID: "100", Kind: "chat", Name: "fixture", LastMessageAt: now, MessageCount: 1}
+	original := Message{SourcePK: 1, ChatJID: "100", ChatName: "fixture", MessageID: "1", Timestamp: now, Text: "original"}
+	if err := st.ReplaceAll(ctx, ImportStats{SourcePath: sourceA, SourcePathCanonical: true, SourceIdentity: "test:a", FinishedAt: now}, nil, []Chat{chat}, nil, nil, nil, []Message{original}); err != nil {
+		t.Fatal(err)
+	}
+
+	overwrite := original
+	overwrite.Text = "wrong source"
+	err := st.MergeAll(ctx, ImportStats{SourcePath: sourceB, SourcePathCanonical: true, SourceIdentity: "test:b", AdoptSource: true, FinishedAt: now}, nil, []Chat{chat}, nil, nil, nil, []Message{overwrite})
+	if err == nil || !strings.Contains(err.Error(), "use --replace") {
+		t.Fatalf("error = %v, want source mismatch requiring --replace", err)
+	}
+	messages, err := st.Messages(ctx, MessageFilter{ChatJID: "100", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Text != "original" {
+		t.Fatalf("messages = %#v, want original preserved", messages)
+	}
+}
+
+func TestMergeAllRequiresExplicitLegacySourceAdoption(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	st := openTestStore(t, filepath.Join(t.TempDir(), "legacy-source.db"))
+	chat := Chat{JID: "100", Kind: "chat", Name: "fixture", LastMessageAt: now, MessageCount: 1}
+	message := Message{SourcePK: 1, ChatJID: "100", ChatName: "fixture", MessageID: "1", Timestamp: now, Text: "original", MediaType: "photo", MediaTitle: "legacy photo", MediaPath: "/archive/photo", MediaURL: "https://example.com/photo", MediaSize: 123}
+	if err := st.ReplaceAll(ctx, ImportStats{SourcePath: "relative-source", FinishedAt: now}, nil, []Chat{chat}, nil, nil, nil, []Message{message}); err != nil {
+		t.Fatal(err)
+	}
+
+	canonicalSource := t.TempDir()
+	message.Text = "updated"
+	message.MediaType = ""
+	message.MediaTitle = ""
+	message.MediaPath = ""
+	message.MediaURL = ""
+	message.MediaSize = 0
+	stats := ImportStats{SourcePath: canonicalSource, SourcePathCanonical: true, SourceIdentity: "test:current", FinishedAt: now.Add(time.Minute)}
+	if err := st.MergeAll(ctx, stats, nil, []Chat{chat}, nil, nil, nil, []Message{message}); err == nil || !strings.Contains(err.Error(), "use --adopt-source") {
+		t.Fatalf("error = %v, want explicit legacy adoption", err)
+	}
+	stats.AdoptSource = true
+	if err := st.MergeAll(ctx, stats, nil, []Chat{chat}, nil, nil, nil, []Message{message}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := st.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.LastSource != canonicalSource {
+		t.Fatalf("source_path = %q, want adopted %q", status.LastSource, canonicalSource)
+	}
+	var marker string
+	if err := st.db.QueryRowContext(ctx, `select value from sync_state where key='source_path_canonical'`).Scan(&marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker != "1" {
+		t.Fatalf("source_path_canonical = %q, want 1", marker)
+	}
+	var identity string
+	if err := st.db.QueryRowContext(ctx, `select value from sync_state where key='source_identity'`).Scan(&identity); err != nil {
+		t.Fatal(err)
+	}
+	if identity != "test:current" {
+		t.Fatalf("source_identity = %q, want test:current", identity)
+	}
+	messages, err := st.Messages(ctx, MessageFilter{HasMedia: true, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].MediaPath != "/archive/photo" || messages[0].MediaURL != "https://example.com/photo" || messages[0].MediaSize != 123 {
+		t.Fatalf("legacy media = %#v, want archived reference preserved", messages)
+	}
+	search, err := st.Search(ctx, MessageFilter{Query: "legacy photo", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(search) != 1 {
+		t.Fatalf("legacy media FTS matches = %d, want 1", len(search))
+	}
+}
+
+func TestMergeAllDoesNotAdoptMessageFreePopulatedLegacyArchive(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	st := openTestStore(t, filepath.Join(t.TempDir(), "legacy-chat-only.db"))
+	legacyChat := Chat{JID: "100", Kind: "chat", Name: "legacy"}
+	if err := st.ReplaceAll(ctx, ImportStats{SourcePath: "relative-source", FinishedAt: now}, nil, []Chat{legacyChat}, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	incomingChat := Chat{JID: "200", Kind: "chat", Name: "incoming"}
+	err := st.MergeAll(ctx, ImportStats{SourcePath: t.TempDir(), SourcePathCanonical: true, SourceIdentity: "test:current", FinishedAt: now}, nil, []Chat{incomingChat}, nil, nil, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "use --adopt-source") {
+		t.Fatalf("error = %v, want unverifiable legacy source", err)
+	}
+	chats, err := st.ListChats(ctx, 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chats) != 1 || chats[0].JID != "100" {
+		t.Fatalf("chats = %#v, want legacy chat only", chats)
+	}
+}
+
+func TestMergeAllExplicitlyAdoptsMessageFreeLegacySource(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	st := openTestStore(t, filepath.Join(t.TempDir(), "legacy-adopt.db"))
+	legacyChat := Chat{JID: "100", Kind: "chat", Name: "legacy"}
+	if err := st.ReplaceAll(ctx, ImportStats{SourcePath: "relative-source", FinishedAt: now}, nil, []Chat{legacyChat}, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	canonicalSource := t.TempDir()
+	incomingChat := Chat{JID: "200", Kind: "chat", Name: "incoming"}
+	stats := ImportStats{SourcePath: canonicalSource, SourcePathCanonical: true, SourceIdentity: "test:current", AdoptSource: true, FinishedAt: now}
+	if err := st.MergeAll(ctx, stats, nil, []Chat{incomingChat}, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	status, err := st.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.LastSource != canonicalSource || status.Chats != 2 {
+		t.Fatalf("status = %+v, want adopted source and both chats", status)
+	}
+}
+
+func TestReplaceAllClearsCanonicalSourceMarker(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	st := openTestStore(t, filepath.Join(t.TempDir(), "replace-marker.db"))
+	if err := st.ReplaceAll(ctx, ImportStats{SourcePath: t.TempDir(), SourcePathCanonical: true, SourceIdentity: "test:a", FinishedAt: now}, nil, nil, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceAll(ctx, ImportStats{SourcePath: "legacy", FinishedAt: now}, nil, nil, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var marker string
+	err := st.db.QueryRowContext(ctx, `select value from sync_state where key='source_path_canonical'`).Scan(&marker)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("canonical marker = %q err=%v, want absent", marker, err)
+	}
+}
+
+func TestMergeAllReconcilesImportedChatFolders(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	st := openTestStore(t, filepath.Join(t.TempDir(), "folder-merge.db"))
+	stats := ImportStats{SourcePath: t.TempDir(), SourcePathCanonical: true, SourceIdentity: "test:source", FinishedAt: now}
+	chatA := Chat{JID: "100", Kind: "chat", Name: "A", FolderID: "1"}
+	chatB := Chat{JID: "200", Kind: "chat", Name: "B", FolderID: "1"}
+	if err := st.ReplaceAll(
+		ctx, stats, nil,
+		[]Chat{chatA, chatB},
+		[]Folder{{ID: "1", Title: "Old"}},
+		[]FolderChat{{FolderID: "1", ChatJID: "100"}, {FolderID: "1", ChatJID: "200"}},
+		nil, nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	chatA.FolderID = "2"
+	if err := st.MergeAll(
+		ctx, stats, nil,
+		[]Chat{chatA},
+		[]Folder{{ID: "2", Title: "New"}},
+		[]FolderChat{{FolderID: "2", ChatJID: "100"}},
+		nil, nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	oldFolder, err := st.ChatsInFolder(ctx, "1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oldFolder) != 1 || oldFolder[0].JID != "200" {
+		t.Fatalf("old folder chats = %#v, want only outside-window chat B", oldFolder)
+	}
+	newFolder, err := st.ChatsInFolder(ctx, "2", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(newFolder) != 1 || newFolder[0].JID != "100" {
+		t.Fatalf("new folder chats = %#v, want imported chat A", newFolder)
 	}
 }

@@ -2,6 +2,10 @@
 
 ## [0.3.4] - Unreleased
 
+### Fixed
+
+- Preserve chats and messages outside bounded import windows by merging imports by default, pin and verify source identity, and require explicit `--replace` for destructive archive replacement.
+
 ### Changed
 
 - Notarize every official macOS release binary with the OpenClaw Foundation Developer ID and verify exact signing metadata, the canonical designated requirement, strict code validity, and online notarization before GoReleaser archives it.

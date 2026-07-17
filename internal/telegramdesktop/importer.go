@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ type ImportOptions struct {
 	Progress                io.Writer
 	ExistingMediaSourcePath string
 	ExistingMediaRefs       []ExistingMediaRef
+	MediaArchiveDir         string
 }
 
 type ExistingMediaRef struct {
@@ -48,9 +50,14 @@ type ImportResult struct {
 
 func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResult, error) {
 	source := resolveImportSource(strings.TrimSpace(opts.Path))
+	canonicalPath, err := canonicalImportSourcePath(source.path)
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("resolve Telegram source target: %w", err)
+	}
+	source.path = canonicalPath
+	source.postbox = LooksLikePostbox(source.path)
 	var mediaTempDir string
 	if opts.FetchMedia {
-		var err error
 		mediaTempDir, err = os.MkdirTemp("", "telecrawl-telegram-media-*")
 		if err != nil {
 			return ImportResult{}, err
@@ -62,7 +69,8 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 		if err != nil {
 			return ImportResult{}, err
 		}
-		archiveDir := mediaArchiveDir(dbPath)
+		result.Stats.SourcePathCanonical = true
+		archiveDir := importMediaArchiveDir(opts, dbPath)
 		if err := copyImportedContactAvatars(result.Contacts, archiveDir); err != nil {
 			return ImportResult{}, err
 		}
@@ -76,7 +84,8 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 	if err != nil {
 		return ImportResult{}, err
 	}
-	archiveDir := mediaArchiveDir(dbPath)
+	result.Stats.SourcePathCanonical = true
+	archiveDir := importMediaArchiveDir(opts, dbPath)
 	if err := copyImportedContactAvatars(result.Contacts, archiveDir); err != nil {
 		return ImportResult{}, err
 	}
@@ -84,6 +93,13 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 		return ImportResult{}, err
 	}
 	return result, nil
+}
+
+func importMediaArchiveDir(opts ImportOptions, dbPath string) string {
+	if path := strings.TrimSpace(opts.MediaArchiveDir); path != "" {
+		return path
+	}
+	return mediaArchiveDir(dbPath)
 }
 
 func importPostboxGo(ctx context.Context, sourcePath string, opts ImportOptions, dbPath, mediaTempDir string) (ImportResult, error) {
@@ -95,6 +111,7 @@ func importPostboxGo(ctx context.Context, sourcePath string, opts ImportOptions,
 	if len(sources) == 0 {
 		return ImportResult{}, errors.New("no Telegram for macOS Postbox account databases found")
 	}
+	accountIdentities := make([]string, 0, len(sources))
 	multiAccount := len(sources) > 1
 	allPeers := make(map[string]string)
 	allContacts := make(map[string]store.Contact)
@@ -111,6 +128,12 @@ func importPostboxGo(ctx context.Context, sourcePath string, opts ImportOptions,
 		})
 		if err != nil {
 			return ImportResult{}, fmt.Errorf("read postbox records %s: %w", source.DBPath, err)
+		}
+		if records.AccountPeerID != "" {
+			accountIdentities = append(accountIdentities, "peer:"+records.AccountPeerID)
+		} else {
+			digest := sha256.Sum256(key)
+			accountIdentities = append(accountIdentities, fmt.Sprintf("database-key:%x", digest[:]))
 		}
 		for id, display := range records.Peers {
 			allPeers[id] = display
@@ -221,6 +244,7 @@ func importPostboxGo(ctx context.Context, sourcePath string, opts ImportOptions,
 	})
 	finished := time.Now().UTC()
 	result.Stats.SourcePath = sourcePath
+	result.Stats.SourceIdentity = sourceIdentity("postbox", accountIdentities...)
 	result.Stats.DBPath = dbPath
 	result.Stats.Chats = len(result.Chats)
 	result.Stats.Messages = len(result.Messages)
@@ -234,6 +258,13 @@ func importPostboxGo(ctx context.Context, sourcePath string, opts ImportOptions,
 	result.Stats.StartedAt = started
 	result.Stats.FinishedAt = finished
 	return result, nil
+}
+
+func sourceIdentity(kind string, values ...string) string {
+	sort.Strings(values)
+	values = slices.Compact(values)
+	digest := sha256.Sum256([]byte(kind + "\x00" + strings.Join(values, "\x00")))
+	return fmt.Sprintf("%s:%x", kind, digest[:])
 }
 
 func postboxMessageIdentity(msg postboxpkg.MessageRecord) string {
@@ -546,20 +577,27 @@ func resolveImportSourcePaths(path, tdesktop, postbox string) importSource {
 }
 
 func sameImportSourcePath(left, right string) bool {
-	left = strings.TrimSpace(left)
-	right = strings.TrimSpace(right)
-	if left == "" || right == "" {
-		return false
-	}
-	leftAbs, err := filepath.Abs(filepath.Clean(left))
+	leftPath, err := canonicalImportSourcePath(left)
 	if err != nil {
 		return false
 	}
-	rightAbs, err := filepath.Abs(filepath.Clean(right))
+	rightPath, err := canonicalImportSourcePath(right)
 	if err != nil {
 		return false
 	}
-	return leftAbs == rightAbs
+	return leftPath == rightPath
+}
+
+func canonicalImportSourcePath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", errors.New("source path is required")
+	}
+	absolute, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(absolute)
 }
 
 func mediaArchiveDir(dbPath string) string {
