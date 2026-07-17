@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -23,13 +24,16 @@ func TestStoreImportResultUpsertsReturnedAccountScopedChats(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
+	sourcePath := t.TempDir()
 
 	full := accountScopedImportResult("old")
-	if err := storeImportResult(ctx, st, &full, ""); err != nil {
+	full.Stats.SourcePath = sourcePath
+	if err := storeImportResult(ctx, st, &full, "", false); err != nil {
 		t.Fatal(err)
 	}
 	partial := accountScopedImportResult("new")
-	if err := storeImportResult(ctx, st, &partial, "100"); err != nil {
+	partial.Stats.SourcePath = sourcePath
+	if err := storeImportResult(ctx, st, &partial, "100", false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -48,6 +52,323 @@ func TestStoreImportResultUpsertsReturnedAccountScopedChats(t *testing.T) {
 	want := []string{"new a", "new b"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("messages = %v, want %v", got, want)
+	}
+}
+
+func TestStoreImportResultMergesBoundedWindowUnlessReplace(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "telecrawl.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	older := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Hour)
+	sourcePath := t.TempDir()
+	full := telegramdesktop.ImportResult{
+		Stats: store.ImportStats{SourcePath: sourcePath, SourceIdentity: "test:fixture", StartedAt: older, FinishedAt: older},
+		Chats: []store.Chat{{JID: "100", Kind: "chat", Name: "fixture", LastMessageAt: newer, MessageCount: 2}},
+		Messages: []store.Message{
+			{SourcePK: 1, ChatJID: "100", ChatName: "fixture", MessageID: "1", Timestamp: older, Text: "older"},
+			{SourcePK: 2, ChatJID: "100", ChatName: "fixture", MessageID: "2", Timestamp: newer, Text: "newer"},
+		},
+	}
+	if err := storeImportResult(ctx, st, &full, "", false); err != nil {
+		t.Fatal(err)
+	}
+	status, err := st.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(full.Stats.SourcePath) || status.LastSource != full.Stats.SourcePath {
+		t.Fatalf("source paths = result %q stored %q, want matching absolute paths", full.Stats.SourcePath, status.LastSource)
+	}
+
+	windowed := telegramdesktop.ImportResult{
+		Stats: store.ImportStats{SourcePath: sourcePath, SourceIdentity: "test:fixture", StartedAt: newer, FinishedAt: newer},
+		Chats: []store.Chat{{JID: "100", Kind: "chat", Name: "fixture", LastMessageAt: newer, MessageCount: 2}},
+		Messages: []store.Message{
+			{SourcePK: 2, ChatJID: "100", ChatName: "fixture", MessageID: "2", Timestamp: newer, Text: "newer updated"},
+		},
+	}
+	if err := storeImportResult(ctx, st, &windowed, "", false); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := st.Messages(ctx, store.MessageFilter{ChatJID: "100", Limit: 10, Asc: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("merged messages = %d, want 2", len(messages))
+	}
+	if got, want := []string{messages[0].Text, messages[1].Text}, []string{"older", "newer updated"}; !slices.Equal(got, want) {
+		t.Fatalf("merged messages = %v, want %v", got, want)
+	}
+
+	if err := storeImportResult(ctx, st, &windowed, "", true); err != nil {
+		t.Fatal(err)
+	}
+	messages, err = st.Messages(ctx, store.MessageFilter{ChatJID: "100", Limit: 10, Asc: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Text != "newer updated" {
+		t.Fatalf("replaced messages = %#v, want only windowed message", messages)
+	}
+}
+
+func TestStoreImportResultRejectsRetargetedSourceSymlink(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "telecrawl.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	targetA := t.TempDir()
+	targetB := t.TempDir()
+	link := filepath.Join(t.TempDir(), "current")
+	if err := os.Symlink(targetA, link); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	result := telegramdesktop.ImportResult{
+		Stats:    store.ImportStats{SourcePath: link, SourceIdentity: "test:a", FinishedAt: now},
+		Chats:    []store.Chat{{JID: "100", Kind: "chat", Name: "fixture"}},
+		Messages: []store.Message{{SourcePK: 1, ChatJID: "100", MessageID: "1", Timestamp: now, Text: "original"}},
+	}
+	if err := storeImportResult(ctx, st, &result, "", false); err != nil {
+		t.Fatal(err)
+	}
+	canonicalTargetA, err := filepath.EvalSymlinks(targetA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stats.SourcePath != canonicalTargetA {
+		t.Fatalf("canonical source = %q, want %q", result.Stats.SourcePath, canonicalTargetA)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(targetB, link); err != nil {
+		t.Fatal(err)
+	}
+	result.Stats.SourcePath = link
+	result.Stats.SourceIdentity = "test:b"
+	result.Messages[0].Text = "wrong source"
+	err = storeImportResult(ctx, st, &result, "", false)
+	if err == nil || !strings.Contains(err.Error(), "use --replace") {
+		t.Fatalf("error = %v, want source mismatch requiring --replace", err)
+	}
+	messages, err := st.Messages(ctx, store.MessageFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Text != "original" {
+		t.Fatalf("messages = %#v, want original preserved", messages)
+	}
+}
+
+func TestPrepareImportResultSourceKeepsPinnedCanonicalPath(t *testing.T) {
+	t.Parallel()
+	pinned := filepath.Join(t.TempDir(), "source-that-may-move")
+	result := telegramdesktop.ImportResult{Stats: store.ImportStats{SourcePath: pinned, SourcePathCanonical: true}}
+	if err := prepareImportResultSource(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Stats.SourcePath != pinned {
+		t.Fatalf("source_path = %q, want pinned %q", result.Stats.SourcePath, pinned)
+	}
+}
+
+func TestPromoteImportMediaMovesStagedFiles(t *testing.T) {
+	t.Parallel()
+	stage := t.TempDir()
+	archive := filepath.Join(t.TempDir(), "media")
+	stagedPath := writeContentAddressedMedia(t, stage, []byte("fixture media"))
+	result := telegramdesktop.ImportResult{
+		Messages: []store.Message{{MediaPath: stagedPath}},
+		Contacts: []store.Contact{{AvatarPath: stagedPath}},
+	}
+	if err := promoteImportMedia(&result, stage, archive); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(archive, filepath.Base(filepath.Dir(stagedPath)), filepath.Base(stagedPath))
+	want, err := filepath.EvalSymlinks(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Messages[0].MediaPath != want || result.Contacts[0].AvatarPath != want {
+		t.Fatalf("promoted paths = message %q avatar %q, want %q", result.Messages[0].MediaPath, result.Contacts[0].AvatarPath, want)
+	}
+	data, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "fixture media" {
+		t.Fatalf("promoted media = %q", data)
+	}
+}
+
+func TestPromoteImportMediaKeepsExistingArchivePath(t *testing.T) {
+	t.Parallel()
+	archive := filepath.Join(t.TempDir(), "media")
+	existing := writeContentAddressedMedia(t, archive, []byte("existing"))
+	existing, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := telegramdesktop.ImportResult{Messages: []store.Message{{MediaPath: existing}}}
+	if err := promoteImportMedia(&result, t.TempDir(), archive); err != nil {
+		t.Fatal(err)
+	}
+	if result.Messages[0].MediaPath != existing {
+		t.Fatalf("media path = %q, want existing %q", result.Messages[0].MediaPath, existing)
+	}
+	if _, err := os.Stat(existing); err != nil {
+		t.Fatalf("existing archive media removed: %v", err)
+	}
+}
+
+func TestPromoteImportMediaConcurrentReuseKeepsSharedFile(t *testing.T) {
+	t.Parallel()
+	archive := filepath.Join(t.TempDir(), "media")
+	firstStage := t.TempDir()
+	secondStage := t.TempDir()
+	firstPath := writeContentAddressedMedia(t, firstStage, []byte("shared"))
+	secondPath := writeContentAddressedMedia(t, secondStage, []byte("shared"))
+	first := telegramdesktop.ImportResult{Messages: []store.Message{{MediaPath: firstPath}}}
+	second := telegramdesktop.ImportResult{Messages: []store.Message{{MediaPath: secondPath}}}
+
+	if err := promoteImportMedia(&first, firstStage, archive); err != nil {
+		t.Fatal(err)
+	}
+	if err := promoteImportMedia(&second, secondStage, archive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(first.Messages[0].MediaPath); err != nil {
+		t.Fatalf("shared media missing after reuse: %v", err)
+	}
+}
+
+func TestPromoteImportMediaKeepsContentOnPartialFailure(t *testing.T) {
+	t.Parallel()
+	stage := t.TempDir()
+	archive := filepath.Join(t.TempDir(), "media")
+	staged := writeContentAddressedMedia(t, stage, []byte("first"))
+	result := telegramdesktop.ImportResult{Messages: []store.Message{{MediaPath: staged}, {MediaPath: filepath.Join(t.TempDir(), "outside")}}}
+	if err := promoteImportMedia(&result, stage, archive); err == nil {
+		t.Fatal("promotion succeeded with outside path")
+	}
+	promoted := filepath.Join(archive, filepath.Base(filepath.Dir(staged)), filepath.Base(staged))
+	if _, err := os.Stat(promoted); err != nil {
+		t.Fatalf("immutable promoted media removed after partial failure: %v", err)
+	}
+}
+
+func TestPromoteImportMediaRejectsCorruptExistingDestination(t *testing.T) {
+	t.Parallel()
+	stage := t.TempDir()
+	archive := filepath.Join(t.TempDir(), "media")
+	staged := writeContentAddressedMedia(t, stage, []byte("correct"))
+	destination := filepath.Join(archive, filepath.Base(filepath.Dir(staged)), filepath.Base(staged))
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := telegramdesktop.ImportResult{Messages: []store.Message{{MediaPath: staged}}}
+	if err := promoteImportMedia(&result, stage, archive); err == nil {
+		t.Fatal("promotion accepted corrupt existing destination")
+	}
+	data, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "correct" {
+		t.Fatalf("staged media = %q, want preserved correct copy", data)
+	}
+}
+
+func TestPromoteImportMediaRejectsSymlinkedArchivePrefix(t *testing.T) {
+	t.Parallel()
+	stage := t.TempDir()
+	archive := filepath.Join(t.TempDir(), "media")
+	staged := writeContentAddressedMedia(t, stage, []byte("redirected"))
+	digest := filepath.Base(staged)
+	outside := t.TempDir()
+	if err := os.MkdirAll(archive, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(archive, digest[:2])); err != nil {
+		t.Fatal(err)
+	}
+	result := telegramdesktop.ImportResult{Messages: []store.Message{{MediaPath: staged}}}
+	if err := promoteImportMedia(&result, stage, archive); err == nil {
+		t.Fatal("promotion accepted symlinked archive prefix")
+	}
+	if _, err := os.Stat(filepath.Join(outside, digest)); !os.IsNotExist(err) {
+		t.Fatalf("escaped media stat err = %v, want not exists", err)
+	}
+}
+
+func writeContentAddressedMedia(t *testing.T, root string, data []byte) string {
+	t.Helper()
+	digest := fmt.Sprintf("%x", sha256.Sum256(data))
+	path := filepath.Join(root, digest[:2], digest)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestStoreImportResultValidatesAllFilteredChatsBeforeLegacyAdoption(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "telecrawl.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	legacyChats := []store.Chat{{JID: "111", Kind: "chat"}, {JID: "222", Kind: "chat"}}
+	legacyMessages := []store.Message{
+		{SourcePK: 1, ChatJID: "111", MessageID: "1", Timestamp: now, Text: "old a"},
+		{SourcePK: 2, ChatJID: "222", MessageID: "2", Timestamp: now, Text: "old b"},
+	}
+	if err := st.ReplaceAll(ctx, store.ImportStats{SourcePath: "relative-source", FinishedAt: now}, nil, legacyChats, nil, nil, nil, legacyMessages); err != nil {
+		t.Fatal(err)
+	}
+	result := telegramdesktop.ImportResult{
+		Stats: store.ImportStats{SourcePath: t.TempDir(), SourceIdentity: "test:current", FinishedAt: now.Add(time.Minute)},
+		Chats: legacyChats,
+		Messages: []store.Message{
+			{SourcePK: 1, ChatJID: "111", MessageID: "1", Timestamp: now, Text: "new a"},
+			{SourcePK: 2, ChatJID: "222", MessageID: "different", Timestamp: now, Text: "wrong source"},
+		},
+	}
+	err = storeImportResult(ctx, st, &result, "100", false)
+	if err == nil || !strings.Contains(err.Error(), "use --adopt-source") {
+		t.Fatalf("error = %v, want legacy identity mismatch", err)
+	}
+	messages, err := st.Messages(ctx, store.MessageFilter{Limit: 10, Asc: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := []string{messages[0].Text, messages[1].Text}, []string{"old a", "old b"}; !slices.Equal(got, want) {
+		t.Fatalf("messages = %v, want atomic preservation %v", got, want)
+	}
+	status, err := st.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.LastSource != "relative-source" {
+		t.Fatalf("source = %q, want legacy source unchanged", status.LastSource)
 	}
 }
 
@@ -231,22 +552,20 @@ func TestMetadataAdvertisesContactExport(t *testing.T) {
 
 func TestStoreImportResultPreservesArchivedMediaOnReimport(t *testing.T) {
 	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "telecrawl.db"))
+	dbPath := filepath.Join(t.TempDir(), "telecrawl.db")
+	st, err := store.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
 
 	now := time.Unix(1_800_000_000, 0).UTC()
-	archivedPath := filepath.Join(t.TempDir(), "media", "abc")
-	if err := os.MkdirAll(filepath.Dir(archivedPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(archivedPath, []byte("archived"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	sourcePath := t.TempDir()
+	archivedData := []byte("archived")
+	archivedSize := int64(len(archivedData))
+	archivedPath := writeContentAddressedMedia(t, filepath.Join(filepath.Dir(dbPath), "media"), archivedData)
 	first := telegramdesktop.ImportResult{
-		Stats: store.ImportStats{SourcePath: "postbox", StartedAt: now, FinishedAt: now},
+		Stats: store.ImportStats{SourcePath: sourcePath, SourceIdentity: "test:media", StartedAt: now, FinishedAt: now},
 		Chats: []store.Chat{{JID: "100", Kind: "chat", Name: "saved media", LastMessageAt: now, MessageCount: 1}},
 		Messages: []store.Message{{
 			SourcePK:  9,
@@ -256,12 +575,13 @@ func TestStoreImportResultPreservesArchivedMediaOnReimport(t *testing.T) {
 			Timestamp: now,
 			MediaType: "photo",
 			MediaPath: archivedPath,
-			MediaSize: 123,
+			MediaSize: archivedSize,
 		}},
 	}
-	if err := storeImportResult(ctx, st, &first, ""); err != nil {
+	if err := storeImportResult(ctx, st, &first, "", false); err != nil {
 		t.Fatal(err)
 	}
+	archivedPath = first.Messages[0].MediaPath
 
 	second := telegramdesktop.ImportResult{
 		Stats: first.Stats,
@@ -274,10 +594,10 @@ func TestStoreImportResultPreservesArchivedMediaOnReimport(t *testing.T) {
 			Timestamp: now,
 		}},
 	}
-	if err := storeImportResult(ctx, st, &second, ""); err != nil {
+	if err := storeImportResult(ctx, st, &second, "", false); err != nil {
 		t.Fatal(err)
 	}
-	if second.Stats.MediaMessages != 1 || second.Stats.MediaFiles != 1 || second.Stats.MediaBytes != 123 {
+	if second.Stats.MediaMessages != 1 || second.Stats.MediaFiles != 1 || second.Stats.MediaBytes != archivedSize {
 		t.Fatalf("refreshed stats = %+v, want preserved media stats", second.Stats)
 	}
 
@@ -288,8 +608,8 @@ func TestStoreImportResultPreservesArchivedMediaOnReimport(t *testing.T) {
 	if len(messages) != 1 {
 		t.Fatalf("messages = %d, want 1", len(messages))
 	}
-	if messages[0].MediaPath != archivedPath || messages[0].MediaSize != 123 {
-		t.Fatalf("media ref = path %q size %d, want %q/123", messages[0].MediaPath, messages[0].MediaSize, archivedPath)
+	if messages[0].MediaPath != archivedPath || messages[0].MediaSize != archivedSize {
+		t.Fatalf("media ref = path %q size %d, want %q/%d", messages[0].MediaPath, messages[0].MediaSize, archivedPath, archivedSize)
 	}
 	if messages[0].MediaType != "photo" {
 		t.Fatalf("media type = %q, want preserved photo", messages[0].MediaType)
@@ -303,7 +623,7 @@ func TestStoreImportResultPreservesArchivedMediaOnReimport(t *testing.T) {
 	}
 
 	otherSource := telegramdesktop.ImportResult{
-		Stats: store.ImportStats{SourcePath: "other-postbox", StartedAt: now, FinishedAt: now},
+		Stats: store.ImportStats{SourcePath: sourcePath, SourceIdentity: "test:other", StartedAt: now, FinishedAt: now},
 		Chats: first.Chats,
 		Messages: []store.Message{{
 			SourcePK:  9,
@@ -314,7 +634,7 @@ func TestStoreImportResultPreservesArchivedMediaOnReimport(t *testing.T) {
 			MediaType: "photo",
 		}},
 	}
-	if err := storeImportResult(ctx, st, &otherSource, ""); err != nil {
+	if err := storeImportResult(ctx, st, &otherSource, "", true); err != nil {
 		t.Fatal(err)
 	}
 	messages, err = st.Messages(ctx, store.MessageFilter{HasMedia: true, Limit: 10})
@@ -433,10 +753,37 @@ func TestUsageDocumentsMediaFetchOptIn(t *testing.T) {
 	}
 }
 
+func TestUsageDocumentsDestructiveReplace(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	printUsage(&out)
+	if !strings.Contains(out.String(), "--replace first deletes the entire existing archive") {
+		t.Fatalf("usage should document destructive replace:\n%s", out.String())
+	}
+}
+
+func TestImportRejectsReplaceWithChat(t *testing.T) {
+	t.Parallel()
+	var out, errOut bytes.Buffer
+	err := Run(context.Background(), []string{"import", "--replace", "--chat", "100"}, &out, &errOut)
+	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--replace cannot be combined with --chat") {
+		t.Fatalf("error = %v (exit %d), want usage error", err, ExitCode(err))
+	}
+}
+
+func TestImportRejectsReplaceWithAdoptSource(t *testing.T) {
+	t.Parallel()
+	var out, errOut bytes.Buffer
+	err := Run(context.Background(), []string{"import", "--replace", "--adopt-source"}, &out, &errOut)
+	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--replace cannot be combined with --adopt-source") {
+		t.Fatalf("error = %v (exit %d), want usage error", err, ExitCode(err))
+	}
+}
+
 func accountScopedImportResult(label string) telegramdesktop.ImportResult {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	return telegramdesktop.ImportResult{
-		Stats: store.ImportStats{SourcePath: "postbox", StartedAt: now, FinishedAt: now},
+		Stats: store.ImportStats{SourcePath: "postbox", SourceIdentity: "test:account", StartedAt: now, FinishedAt: now},
 		Contacts: []store.Contact{
 			{JID: "111", FullName: "Account A"},
 			{JID: "10", FullName: "Sender A"},

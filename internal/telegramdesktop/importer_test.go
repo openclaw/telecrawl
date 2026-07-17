@@ -70,6 +70,34 @@ func TestPostboxParserSanitizedFixture(t *testing.T) {
 	}
 }
 
+func TestImportPinsCanonicalSourceBeforeReading(t *testing.T) {
+	root, _, _ := makePostboxFixture(t)
+	link := filepath.Join(t.TempDir(), "current")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Import(context.Background(), ImportOptions{Path: link}, filepath.Join(t.TempDir(), "telecrawl.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stats.SourcePath != want || !result.Stats.SourcePathCanonical || result.Stats.SourceIdentity == "" {
+		t.Fatalf("source_path = %q, want pinned target %q", result.Stats.SourcePath, want)
+	}
+}
+
+func TestSourceIdentityIsOrderIndependent(t *testing.T) {
+	t.Parallel()
+	left := sourceIdentity("postbox", "2", "1", "1")
+	right := sourceIdentity("postbox", "1", "2")
+	if left != right || left == sourceIdentity("postbox", "1", "3") {
+		t.Fatalf("source identities = left %q right %q", left, right)
+	}
+}
+
 func TestCopyImportedMediaArchivesByContentHash(t *testing.T) {
 	t.Parallel()
 	source := filepath.Join(t.TempDir(), "source-media")
@@ -341,6 +369,9 @@ func TestTDataWebpageMediaFileFallback(t *testing.T) {
 func TestTDataExistingMediaRefsRequireFetchAndSameSource(t *testing.T) {
 	t.Parallel()
 	source := filepath.Join(t.TempDir(), "tdata")
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	ref := ExistingMediaRef{SourcePK: 42, MediaPath: "/tmp/already-archived", MediaSize: 12}
 	if refs := tdataExistingMediaRefs(ImportOptions{ExistingMediaRefs: []ExistingMediaRef{ref}}, source); refs != nil {
 		t.Fatalf("refs without fetch = %#v, want nil", refs)

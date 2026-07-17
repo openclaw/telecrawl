@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -160,17 +161,29 @@ func (r *runtime) runImport(args []string) error {
 	messagesLimit := fs.Int("messages-limit", 500, "")
 	chat := fs.String("chat", "", "")
 	fetchMedia := fs.Bool("fetch-media", false, "")
+	replace := fs.Bool("replace", false, "")
+	adoptSource := fs.Bool("adopt-source", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
 	if fs.NArg() != 0 {
 		return usageErr(errors.New("import takes flags only"))
 	}
+	if *replace && strings.TrimSpace(*chat) != "" {
+		return usageErr(errors.New("--replace cannot be combined with --chat"))
+	}
+	if *replace && *adoptSource {
+		return usageErr(errors.New("--replace cannot be combined with --adopt-source"))
+	}
 	return r.withStore(func(st *store.Store) error {
+		mediaStage, err := os.MkdirTemp(filepath.Dir(st.Path()), ".telecrawl-import-media-*")
+		if err != nil {
+			return err
+		}
+		defer func() { _ = os.RemoveAll(mediaStage) }()
 		var existingMediaSourcePath string
 		var existingMediaRefs []telegramdesktop.ExistingMediaRef
-		if *fetchMedia {
-			var err error
+		if *fetchMedia && !*replace {
 			existingMediaSourcePath, existingMediaRefs, err = existingMediaRefsForImport(r.ctx, st)
 			if err != nil {
 				return err
@@ -185,35 +198,302 @@ func (r *runtime) runImport(args []string) error {
 			Progress:                r.stderr,
 			ExistingMediaSourcePath: existingMediaSourcePath,
 			ExistingMediaRefs:       existingMediaRefs,
+			MediaArchiveDir:         mediaStage,
 		}, st.Path())
 		if err != nil {
 			return err
 		}
-		if err := storeImportResult(r.ctx, st, &result, *chat); err != nil {
+		result.Stats.AdoptSource = *adoptSource
+		if err := prepareImportResultSource(&result); err != nil {
+			return err
+		}
+		if !*replace {
+			if err := st.ValidateMergeSource(r.ctx, result.Stats, result.Messages); err != nil {
+				return err
+			}
+		}
+		if !*replace {
+			if err := preserveExistingMediaRefs(r.ctx, st, result.Stats.SourcePath, result.Messages, true); err != nil {
+				return err
+			}
+		}
+		if err := promoteImportMedia(&result, mediaStage, filepath.Join(filepath.Dir(st.Path()), "media")); err != nil {
+			return err
+		}
+		if err := storeImportResult(r.ctx, st, &result, *chat, *replace); err != nil {
 			return err
 		}
 		return r.print(result.Stats)
 	})
 }
 
-func storeImportResult(ctx context.Context, st *store.Store, result *telegramdesktop.ImportResult, chatFilter string) error {
-	if err := preserveExistingMediaRefs(ctx, st, result.Stats.SourcePath, result.Messages); err != nil {
+func storeImportResult(ctx context.Context, st *store.Store, result *telegramdesktop.ImportResult, chatFilter string, replace bool) error {
+	if err := prepareImportResultSource(result); err != nil {
+		return err
+	}
+	if !replace {
+		if err := preserveExistingMediaRefs(ctx, st, result.Stats.SourcePath, result.Messages, true); err != nil {
+			return err
+		}
+	}
+	if err := validateImportMediaRefs(result, filepath.Join(filepath.Dir(st.Path()), "media")); err != nil {
 		return err
 	}
 	refreshImportMediaStats(result)
 	if strings.TrimSpace(chatFilter) == "" {
-		return st.ReplaceAll(ctx, result.Stats, result.Contacts, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages)
+		if replace {
+			return st.ReplaceAll(ctx, result.Stats, result.Contacts, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages)
+		}
+		return st.MergeAll(ctx, result.Stats, result.Contacts, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages)
+	}
+	if replace {
+		return errors.New("--replace cannot be combined with --chat")
 	}
 	if len(result.Chats) == 0 {
 		return fmt.Errorf("telegram import returned no chats for --chat %s", chatFilter)
 	}
+	combined := telegramdesktop.ImportResult{Stats: result.Stats, Folders: result.Folders}
+	seenContacts := make(map[string]struct{})
 	for _, chat := range result.Chats {
 		partial := importResultForChat(*result, chat.JID)
-		if err := st.UpsertChat(ctx, partial.Stats, chat.JID, partial.Contacts, partial.Chats, partial.Folders, partial.FolderChats, partial.Topics, partial.Messages); err != nil {
-			return err
+		combined.Chats = append(combined.Chats, partial.Chats...)
+		combined.FolderChats = append(combined.FolderChats, partial.FolderChats...)
+		combined.Topics = append(combined.Topics, partial.Topics...)
+		combined.Messages = append(combined.Messages, partial.Messages...)
+		for _, contact := range partial.Contacts {
+			if _, ok := seenContacts[contact.JID]; ok {
+				continue
+			}
+			seenContacts[contact.JID] = struct{}{}
+			combined.Contacts = append(combined.Contacts, contact)
 		}
 	}
+	return st.MergeAll(ctx, combined.Stats, combined.Contacts, combined.Chats, combined.Folders, combined.FolderChats, combined.Topics, combined.Messages)
+}
+
+func prepareImportResultSource(result *telegramdesktop.ImportResult) error {
+	sourcePath := strings.TrimSpace(result.Stats.SourcePath)
+	if sourcePath == "" {
+		return errors.New("import source path is required")
+	}
+	if result.Stats.SourcePathCanonical {
+		if !filepath.IsAbs(sourcePath) {
+			return errors.New("canonical import source path is not absolute")
+		}
+		result.Stats.SourcePath = filepath.Clean(sourcePath)
+		return nil
+	}
+	sourcePath, err := filepath.Abs(filepath.Clean(sourcePath))
+	if err != nil {
+		return fmt.Errorf("resolve import source path: %w", err)
+	}
+	sourcePath, err = filepath.EvalSymlinks(sourcePath)
+	if err != nil {
+		return fmt.Errorf("resolve import source target: %w", err)
+	}
+	result.Stats.SourcePath = sourcePath
+	result.Stats.SourcePathCanonical = true
 	return nil
+}
+
+func promoteImportMedia(result *telegramdesktop.ImportResult, stageDir, archiveDir string) error {
+	if err := os.MkdirAll(archiveDir, 0o700); err != nil {
+		return err
+	}
+	archiveInfo, err := os.Lstat(archiveDir)
+	if err != nil {
+		return err
+	}
+	if !archiveInfo.IsDir() || archiveInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("media archive %q is not a regular directory", archiveDir)
+	}
+	resolvedArchiveDir, err := filepath.EvalSymlinks(archiveDir)
+	if err != nil {
+		return err
+	}
+	promoted := make(map[string]string)
+	promote := func(path string) (string, error) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return "", nil
+		}
+		if destination, ok := promoted[path]; ok {
+			return destination, nil
+		}
+		if resolvedPathWithin(resolvedArchiveDir, path) {
+			validated, err := validateArchivedMedia(path, resolvedArchiveDir)
+			if err != nil {
+				return "", err
+			}
+			promoted[path] = validated
+			return validated, nil
+		}
+		stagedPath := path
+		relative, err := filepath.Rel(stageDir, path)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+			return "", fmt.Errorf("imported media path %q is outside staging directory", path)
+		}
+		validatedStage, err := validateArchivedMedia(path, stageDir)
+		if err != nil {
+			return "", err
+		}
+		path = validatedStage
+		digest := filepath.Base(path)
+		expectedRelative := filepath.Join(digest[:2], digest)
+		if filepath.Clean(relative) != expectedRelative {
+			return "", fmt.Errorf("imported media path %q has unexpected archive layout", stagedPath)
+		}
+		destinationDir := filepath.Join(resolvedArchiveDir, digest[:2])
+		if err := os.Mkdir(destinationDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+		destinationInfo, err := os.Lstat(destinationDir)
+		if err != nil {
+			return "", err
+		}
+		if !destinationInfo.IsDir() || destinationInfo.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("media archive directory %q is not a regular directory", destinationDir)
+		}
+		destination := filepath.Join(destinationDir, digest)
+		if err := os.Link(path, destination); err == nil {
+			if err := os.Remove(path); err != nil {
+				return "", err
+			}
+			validated, err := validateArchivedMedia(destination, resolvedArchiveDir)
+			if err != nil {
+				return "", err
+			}
+			destination = validated
+		} else if errors.Is(err, os.ErrExist) {
+			validated, err := validateArchivedMedia(destination, resolvedArchiveDir)
+			if err != nil {
+				return "", err
+			}
+			stagedDigest, err := fileSHA256(path)
+			if err != nil {
+				return "", err
+			}
+			if stagedDigest != filepath.Base(validated) {
+				return "", fmt.Errorf("staged media %q does not match existing archive file %q", path, validated)
+			}
+			if err := os.Remove(path); err != nil {
+				return "", err
+			}
+			destination = validated
+		} else {
+			return "", err
+		}
+		promoted[stagedPath] = destination
+		return destination, nil
+	}
+	for i := range result.Messages {
+		path, err := promote(result.Messages[i].MediaPath)
+		if err != nil {
+			return err
+		}
+		result.Messages[i].MediaPath = path
+	}
+	for i := range result.Contacts {
+		path, err := promote(result.Contacts[i].AvatarPath)
+		if err != nil {
+			return err
+		}
+		result.Contacts[i].AvatarPath = path
+	}
+	return nil
+}
+
+func pathWithin(root, path string) bool {
+	root, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return false
+	}
+	path, err = filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+}
+
+func resolvedPathWithin(root, path string) bool {
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	return pathWithin(resolvedRoot, resolvedPath)
+}
+
+func validateArchivedMedia(path, archiveDir string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("archived media %q is not a regular file", path)
+	}
+	resolvedArchive, err := filepath.EvalSymlinks(archiveDir)
+	if err != nil {
+		return "", err
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	if !pathWithin(resolvedArchive, resolvedPath) {
+		return "", fmt.Errorf("archived media %q resolves outside archive directory", path)
+	}
+	digest, err := fileSHA256(resolvedPath)
+	if err != nil {
+		return "", err
+	}
+	if filepath.Base(resolvedPath) != digest || filepath.Base(filepath.Dir(resolvedPath)) != digest[:2] {
+		return "", fmt.Errorf("archived media %q does not match its content hash", path)
+	}
+	return resolvedPath, nil
+}
+
+func validateImportMediaRefs(result *telegramdesktop.ImportResult, archiveDir string) error {
+	for i := range result.Messages {
+		path := strings.TrimSpace(result.Messages[i].MediaPath)
+		if path == "" {
+			continue
+		}
+		validated, err := validateArchivedMedia(path, archiveDir)
+		if err != nil {
+			return err
+		}
+		result.Messages[i].MediaPath = validated
+	}
+	for i := range result.Contacts {
+		path := strings.TrimSpace(result.Contacts[i].AvatarPath)
+		if path == "" {
+			continue
+		}
+		validated, err := validateArchivedMedia(path, archiveDir)
+		if err != nil {
+			return err
+		}
+		result.Contacts[i].AvatarPath = validated
+	}
+	return nil
+}
+
+func fileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = file.Close() }()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 func refreshImportMediaStats(result *telegramdesktop.ImportResult) {
@@ -252,13 +532,13 @@ func existingMediaRefsForImport(ctx context.Context, st *store.Store) (string, [
 	return sourcePath, refs, nil
 }
 
-func preserveExistingMediaRefs(ctx context.Context, st *store.Store, sourcePath string, messages []store.Message) error {
+func preserveExistingMediaRefs(ctx context.Context, st *store.Store, sourcePath string, messages []store.Message, allowLegacySource bool) error {
 	sourcePath = strings.TrimSpace(sourcePath)
 	if sourcePath == "" {
 		return nil
 	}
 	existingSourcePath, refs, err := existingMediaRefs(ctx, st)
-	if err != nil || existingSourcePath != sourcePath {
+	if err != nil || (!allowLegacySource && existingSourcePath != sourcePath) {
 		return err
 	}
 	if len(refs) == 0 {
@@ -913,7 +1193,7 @@ func printUsage(w io.Writer) {
 usage:
   telecrawl [--json] doctor [--path PATH]
   telecrawl [--json] metadata
-  telecrawl [--json] import [--path PATH] [--chat ID] [--dialogs-limit N] [--messages-limit N] [--fetch-media]
+  telecrawl [--json] import [--path PATH] [--chat ID] [--dialogs-limit N] [--messages-limit N] [--fetch-media] [--adopt-source] [--replace]
   telecrawl [--json] status
   telecrawl [--json] folders
   telecrawl [--json] contacts [--limit N]
@@ -927,6 +1207,8 @@ usage:
 
 notes:
   import auto-detects Telegram Desktop tdata or native macOS Postbox data
+  import merges by default; --replace first deletes the entire existing archive
+  --adopt-source non-destructively records a verified legacy archive's current source
   import archives local cached Postbox media by default; --fetch-media also tries Telegram cloud media
   backup writes encrypted age shards to a git repo
 `)

@@ -64,11 +64,31 @@ Import defaults to:
 - latest `200` dialogs
 - latest `500` messages per dialog
 
+Imports merge into the existing archive by default. Chats and messages outside
+the fetched window remain stored.
+
 Use `0` for no limit:
 
 ```bash
 telecrawl import --dialogs-limit 0 --messages-limit 0
 ```
+
+For a destructive full restore, explicitly replace the archive with the import:
+
+```bash
+telecrawl import --dialogs-limit 0 --messages-limit 0 --replace
+```
+
+`--replace` deletes all existing archive rows before storing the fetched import.
+It cannot be combined with `--chat`. Default merges require the same Telegram
+account identity as the existing archive, even when the source path is unchanged;
+use `--replace` when intentionally switching the archive to a different source.
+On the first import after upgrading an archive with legacy source metadata, use
+`--adopt-source` once to assert that the current Telegram account belongs to
+this archive without deleting rows. Message overlap is not treated as account
+proof because different accounts can share the same group or channel history.
+`--adopt-source` cannot override a different already-canonical source and cannot
+be combined with `--replace`.
 
 Add `--fetch-media` when you also want Telegram cloud media that is not cached
 locally:

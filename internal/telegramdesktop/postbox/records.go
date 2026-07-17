@@ -18,9 +18,10 @@ import (
 )
 
 type Records struct {
-	Peers    map[string]string
-	Contacts []Contact
-	Messages []MessageRecord
+	AccountPeerID string
+	Peers         map[string]string
+	Contacts      []Contact
+	Messages      []MessageRecord
 }
 
 type ReadOptions struct {
@@ -154,6 +155,10 @@ func disableSQLiteWALHeader(data []byte) {
 }
 
 func readSourceRecordsDB(ctx context.Context, source Source, db *sql.DB, multiAccount bool, opts ReadOptions) (Records, error) {
+	accountPeerID, err := loadAccountPeerID(ctx, db)
+	if err != nil {
+		return Records{}, err
+	}
 	mediaRoot := filepath.Join(filepath.Dir(filepath.Dir(source.DBPath)), "media")
 	rawPeerRecords, err := LoadPeerRecords(ctx, db, mediaRoot)
 	if err != nil {
@@ -178,7 +183,33 @@ func readSourceRecordsDB(ctx context.Context, source Source, db *sql.DB, multiAc
 	if err != nil {
 		return Records{}, err
 	}
-	return Records{Peers: peers, Contacts: contacts, Messages: messages}, nil
+	return Records{AccountPeerID: accountPeerID, Peers: peers, Contacts: contacts, Messages: messages}, nil
+}
+
+func loadAccountPeerID(ctx context.Context, db *sql.DB) (string, error) {
+	var tableExists int
+	if err := db.QueryRowContext(ctx, `select exists(select 1 from sqlite_master where type='table' and name='t0')`).Scan(&tableExists); err != nil {
+		return "", err
+	}
+	if tableExists == 0 {
+		return "", nil
+	}
+	var state []byte
+	if err := db.QueryRowContext(ctx, `select value from t0 where key=2`).Scan(&state); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
+	}
+	decoded, err := DecodeObject(state)
+	if err != nil {
+		return "", nil
+	}
+	peerID, ok := int64Value(decoded["peerId"])
+	if !ok || peerID == 0 {
+		return "", nil
+	}
+	return strconv.FormatInt(peerID, 10), nil
 }
 
 func LoadMessageRecords(ctx context.Context, db *sql.DB, source Source, rawPeerRecords map[int64]PeerRecord, rawPeers map[int64]string, mediaRoot string, multiAccount bool, opts ReadOptions) ([]MessageRecord, error) {

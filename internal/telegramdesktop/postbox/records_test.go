@@ -2,9 +2,64 @@ package postbox
 
 import (
 	"context"
+	"database/sql"
+	"encoding/binary"
 	"path/filepath"
 	"testing"
 )
+
+func TestLoadAccountPeerIDFromAuthorizedState(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec(`create table t0(key integer primary key, value blob not null)`); err != nil {
+		t.Fatal(err)
+	}
+	const peerID int64 = 36513321142
+	inner := append([]byte{6}, []byte("peerId")...)
+	inner = append(inner, 1)
+	value := make([]byte, 8)
+	binary.LittleEndian.PutUint64(value, uint64(peerID))
+	inner = append(inner, value...)
+	state := []byte{1, '_', 5}
+	value = make([]byte, 8)
+	binary.LittleEndian.PutUint32(value[:4], 1)
+	binary.LittleEndian.PutUint32(value[4:], uint32(len(inner)))
+	state = append(state, value...)
+	state = append(state, inner...)
+	if _, err := db.Exec(`insert into t0(key,value) values(2,?)`, state); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadAccountPeerID(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "36513321142" {
+		t.Fatalf("account peer id = %q, want 36513321142", got)
+	}
+}
+
+func TestLoadAccountPeerIDAllowsUnsupportedStateFallback(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec(`create table t0(key integer primary key, value blob not null); insert into t0(key,value) values(2,x'00')`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadAccountPeerID(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("account peer id = %q, want database-key fallback", got)
+	}
+}
 
 func TestReadSourceRecordsSQLCipherFixture(t *testing.T) {
 	keyAndSalt := make([]byte, 48)

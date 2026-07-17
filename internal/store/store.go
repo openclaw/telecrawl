@@ -23,6 +23,9 @@ type Store struct {
 
 type ImportStats struct {
 	SourcePath             string    `json:"source_path"`
+	SourcePathCanonical    bool      `json:"-"`
+	SourceIdentity         string    `json:"-"`
+	AdoptSource            bool      `json:"-"`
 	DBPath                 string    `json:"db_path"`
 	Chats                  int       `json:"chats"`
 	Messages               int       `json:"messages"`
@@ -218,44 +221,125 @@ func Open(ctx context.Context, path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) Path() string { return s.path }
 
-func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID string, contacts []Contact, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
+func (s *Store) MergeAll(ctx context.Context, stats ImportStats, contacts []Contact, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer rollback(tx)
-	chatID := parseInt64(chatJID)
-	preserveFolderState := len(folders) == 0 && len(folderChats) == 0
-	var existingFolderID string
-	if preserveFolderState {
-		_ = tx.QueryRowContext(ctx, `select coalesce(folder_id,'') from chats where id = ?`, chatID).Scan(&existingFolderID)
+	if err := ensureMergeSource(ctx, tx, stats, messages); err != nil {
+		return err
 	}
-	for _, q := range []struct {
-		sql  string
-		args []any
-	}{
-		{"delete from messages_fts where rowid in (select rowid from messages where chat_jid = ?)", []any{chatJID}},
-		{"delete from messages where chat_jid = ?", []any{chatJID}},
-		{"delete from topics where chat_jid = ?", []any{chatJID}},
-		{"delete from chats where id = ?", []any{chatID}},
-	} {
-		if _, err := tx.ExecContext(ctx, q.sql, q.args...); err != nil {
+	for _, chat := range chats {
+		if _, err := tx.ExecContext(ctx, `delete from folder_chats where chat_jid=?`, chat.JID); err != nil {
 			return err
 		}
 	}
-	if !preserveFolderState {
-		if _, err := tx.ExecContext(ctx, `delete from folder_chats where chat_jid = ?`, chatJID); err != nil {
+	if err := writeImport(ctx, tx, stats, contacts, chats, folders, folderChats, topics, messages); err != nil {
+		return err
+	}
+	for _, chat := range chats {
+		if _, err := tx.ExecContext(ctx, `update chats set message_count=(select count(*) from messages where chat_jid=cast(chats.id as text)) where id=?`, parseInt64(chat.JID)); err != nil {
 			return err
 		}
 	}
+	return tx.Commit()
+}
+
+func (s *Store) ValidateMergeSource(ctx context.Context, stats ImportStats, messages []Message) error {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	return ensureMergeSource(ctx, tx, stats, messages)
+}
+
+func ensureMergeSource(ctx context.Context, tx *sql.Tx, stats ImportStats, _ []Message) error {
+	sourcePath := strings.TrimSpace(stats.SourcePath)
+	if !stats.SourcePathCanonical || !filepath.IsAbs(sourcePath) {
+		return errors.New("refusing to merge without an absolute source path; use --replace")
+	}
+	sourceIdentity := strings.TrimSpace(stats.SourceIdentity)
+	if sourceIdentity == "" {
+		return errors.New("refusing to merge without a source identity; use --replace")
+	}
+	var storedIdentity string
+	err := tx.QueryRowContext(ctx, `select value from sync_state where key='source_identity'`).Scan(&storedIdentity)
+	if err == nil {
+		if storedIdentity != sourceIdentity {
+			return errors.New("refusing to merge a different Telegram source identity; use --replace")
+		}
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if stats.AdoptSource {
+		return nil
+	}
+	var storedSource string
+	sourceErr := tx.QueryRowContext(ctx, `select value from sync_state where key='source_path'`).Scan(&storedSource)
+	if sourceErr == nil {
+		empty, err := sourceArchiveEmpty(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if !empty {
+			return errors.New("refusing to merge into legacy archive with unknown source identity; use --adopt-source or --replace")
+		}
+		return nil
+	}
+	if !errors.Is(sourceErr, sql.ErrNoRows) {
+		return sourceErr
+	}
+	empty, err := sourceArchiveEmpty(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if !empty && !stats.AdoptSource {
+		return errors.New("refusing to merge into archive with unknown source; use --adopt-source or --replace")
+	}
+	return nil
+}
+
+func sourceArchiveEmpty(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var empty int
+	err := tx.QueryRowContext(ctx, `select
+		not exists(select 1 from chats) and
+		not exists(select 1 from folders) and
+		not exists(select 1 from folder_chats) and
+		not exists(select 1 from topics) and
+		not exists(select 1 from contacts) and
+		not exists(select 1 from groups) and
+		not exists(select 1 from group_participants) and
+		not exists(select 1 from messages)`).Scan(&empty)
+	return empty != 0, err
+}
+
+func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, contacts []Contact, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	for _, q := range []string{"delete from messages_fts", "delete from messages", "delete from topics", "delete from folder_chats", "delete from folders", "delete from chats", "delete from contacts", "delete from groups", "delete from group_participants", "delete from sync_state"} {
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return err
+		}
+	}
+	if err := writeImport(ctx, tx, stats, contacts, chats, folders, folderChats, topics, messages); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func writeImport(ctx context.Context, tx *sql.Tx, stats ImportStats, contacts []Contact, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
 	if err := insertContacts(ctx, tx, contacts); err != nil {
 		return err
 	}
 	for _, c := range chats {
-		if preserveFolderState && c.FolderID == "" {
-			c.FolderID = existingFolderID
-		}
-		if _, err := tx.ExecContext(ctx, `insert into chats(id,kind,name,username,last_message_at,unread_count,message_count,folder_id,forum) values(?,?,?,?,?,?,?,?,?)`,
+		if _, err := tx.ExecContext(ctx, `insert into chats(id,kind,name,username,last_message_at,unread_count,message_count,folder_id,forum) values(?,?,?,?,?,?,?,?,?) on conflict(id) do update set kind=excluded.kind, name=excluded.name, username=excluded.username, last_message_at=excluded.last_message_at, unread_count=excluded.unread_count, message_count=excluded.message_count, folder_id=excluded.folder_id, forum=excluded.forum`,
 			parseInt64(c.JID), c.Kind, c.Name, c.Username, unix(c.LastMessageAt), c.UnreadCount, c.MessageCount, c.FolderID, boolInt(c.Forum)); err != nil {
 			return err
 		}
@@ -267,13 +351,13 @@ func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID strin
 		}
 	}
 	for _, fc := range folderChats {
-		if _, err := tx.ExecContext(ctx, `insert into folder_chats(folder_id,chat_jid,position) values(?,?,?)`,
+		if _, err := tx.ExecContext(ctx, `insert into folder_chats(folder_id,chat_jid,position) values(?,?,?) on conflict(folder_id,chat_jid) do update set position=excluded.position`,
 			fc.FolderID, fc.ChatJID, fc.Position); err != nil {
 			return err
 		}
 	}
 	for _, t := range topics {
-		if _, err := tx.ExecContext(ctx, `insert into topics(chat_jid,topic_id,title,top_message_id,icon_color,icon_emoji_id,unread_count,unread_mentions_count,unread_reactions_count,pinned,closed,hidden,last_message_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		if _, err := tx.ExecContext(ctx, `insert into topics(chat_jid,topic_id,title,top_message_id,icon_color,icon_emoji_id,unread_count,unread_mentions_count,unread_reactions_count,pinned,closed,hidden,last_message_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?) on conflict(chat_jid,topic_id) do update set title=excluded.title, top_message_id=excluded.top_message_id, icon_color=excluded.icon_color, icon_emoji_id=excluded.icon_emoji_id, unread_count=excluded.unread_count, unread_mentions_count=excluded.unread_mentions_count, unread_reactions_count=excluded.unread_reactions_count, pinned=excluded.pinned, closed=excluded.closed, hidden=excluded.hidden, last_message_at=excluded.last_message_at`,
 			t.ChatJID, t.TopicID, t.Title, t.TopMessageID, t.IconColor, t.IconEmojiID, t.UnreadCount, t.UnreadMentionsCount, t.UnreadReactionsCount, boolInt(t.Pinned), boolInt(t.Closed), boolInt(t.Hidden), unix(t.LastMessageAt)); err != nil {
 			return err
 		}
@@ -290,60 +374,22 @@ func (s *Store) UpsertChat(ctx context.Context, stats ImportStats, chatJID strin
 			return err
 		}
 	}
-	return tx.Commit()
-}
-
-func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, contacts []Contact, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer rollback(tx)
-	for _, q := range []string{"delete from messages_fts", "delete from messages", "delete from topics", "delete from folder_chats", "delete from folders", "delete from chats", "delete from contacts", "delete from groups", "delete from group_participants", "delete from sync_state"} {
-		if _, err := tx.ExecContext(ctx, q); err != nil {
+	if stats.SourcePathCanonical {
+		if strings.TrimSpace(stats.SourceIdentity) == "" {
+			return errors.New("canonical source identity is required")
+		}
+		if _, err := tx.ExecContext(ctx, `insert into sync_state(key,value,updated_at) values('source_path_canonical','1',?) on conflict(key) do update set value=excluded.value, updated_at=excluded.updated_at`, unix(now)); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `insert into sync_state(key,value,updated_at) values('source_identity',?,?) on conflict(key) do update set value=excluded.value, updated_at=excluded.updated_at`, stats.SourceIdentity, unix(now)); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `delete from sync_state where key in ('source_path_canonical','source_identity')`); err != nil {
 			return err
 		}
 	}
-	if err := insertContacts(ctx, tx, contacts); err != nil {
-		return err
-	}
-	for _, c := range chats {
-		if _, err := tx.ExecContext(ctx, `insert into chats(id,kind,name,username,last_message_at,unread_count,message_count,folder_id,forum) values(?,?,?,?,?,?,?,?,?)`,
-			parseInt64(c.JID), c.Kind, c.Name, c.Username, unix(c.LastMessageAt), c.UnreadCount, c.MessageCount, c.FolderID, boolInt(c.Forum)); err != nil {
-			return err
-		}
-	}
-	for _, f := range folders {
-		if _, err := tx.ExecContext(ctx, `insert into folders(id,title,emoticon,color,flags_json) values(?,?,?,?,?)`,
-			f.ID, f.Title, f.Emoticon, f.Color, f.FlagsJSON); err != nil {
-			return err
-		}
-	}
-	for _, fc := range folderChats {
-		if _, err := tx.ExecContext(ctx, `insert into folder_chats(folder_id,chat_jid,position) values(?,?,?)`,
-			fc.FolderID, fc.ChatJID, fc.Position); err != nil {
-			return err
-		}
-	}
-	for _, t := range topics {
-		if _, err := tx.ExecContext(ctx, `insert into topics(chat_jid,topic_id,title,top_message_id,icon_color,icon_emoji_id,unread_count,unread_mentions_count,unread_reactions_count,pinned,closed,hidden,last_message_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			t.ChatJID, t.TopicID, t.Title, t.TopMessageID, t.IconColor, t.IconEmojiID, t.UnreadCount, t.UnreadMentionsCount, t.UnreadReactionsCount, boolInt(t.Pinned), boolInt(t.Closed), boolInt(t.Hidden), unix(t.LastMessageAt)); err != nil {
-			return err
-		}
-	}
-	if err := insertMessages(ctx, tx, messages); err != nil {
-		return err
-	}
-	now := stats.FinishedAt
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-	for key, value := range map[string]string{"last_import_at": now.Format(time.RFC3339Nano), "source_path": stats.SourcePath} {
-		if _, err := tx.ExecContext(ctx, `insert into sync_state(key,value,updated_at) values(?,?,?)`, key, value, unix(now)); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	return nil
 }
 
 func insertContacts(ctx context.Context, tx *sql.Tx, contacts []Contact) error {
@@ -361,12 +407,14 @@ func insertContacts(ctx context.Context, tx *sql.Tx, contacts []Contact) error {
 
 func insertMessages(ctx context.Context, tx *sql.Tx, messages []Message) error {
 	for _, m := range messages {
-		if _, err := tx.ExecContext(ctx, `insert into messages(source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,metadata_type,metadata_title,metadata_url,metadata_json,starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,edit_ts,forward_json,reactions_json,views,forwards,replies_count,pinned) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		if _, err := tx.ExecContext(ctx, `insert into messages(source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,metadata_type,metadata_title,metadata_url,metadata_json,starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,edit_ts,forward_json,reactions_json,views,forwards,replies_count,pinned) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) on conflict(source_pk) do update set chat_jid=excluded.chat_jid, chat_name=excluded.chat_name, msg_id=excluded.msg_id, sender_jid=excluded.sender_jid, sender_name=excluded.sender_name, ts=excluded.ts, from_me=excluded.from_me, text=excluded.text, raw_type=excluded.raw_type, message_type=excluded.message_type, media_type=case when excluded.media_type='' then messages.media_type else excluded.media_type end, media_title=case when excluded.media_title='' then messages.media_title else excluded.media_title end, media_path=case when excluded.media_path='' then messages.media_path else excluded.media_path end, media_url=case when excluded.media_url='' then messages.media_url else excluded.media_url end, media_size=case when excluded.media_path='' then messages.media_size else excluded.media_size end, metadata_type=excluded.metadata_type, metadata_title=excluded.metadata_title, metadata_url=excluded.metadata_url, metadata_json=excluded.metadata_json, starred=excluded.starred, topic_id=excluded.topic_id, reply_to_msg_id=excluded.reply_to_msg_id, reply_to_chat_jid=excluded.reply_to_chat_jid, thread_id=excluded.thread_id, edit_ts=excluded.edit_ts, forward_json=excluded.forward_json, reactions_json=excluded.reactions_json, views=excluded.views, forwards=excluded.forwards, replies_count=excluded.replies_count, pinned=excluded.pinned`,
 			m.SourcePK, m.ChatJID, m.ChatName, m.MessageID, m.SenderJID, m.SenderName, unix(m.Timestamp), boolInt(m.FromMe), m.Text, m.RawType, m.MessageType, m.MediaType, m.MediaTitle, m.MediaPath, m.MediaURL, m.MediaSize, m.MetadataType, m.MetadataTitle, m.MetadataURL, m.MetadataJSON, boolInt(m.Starred), m.TopicID, m.ReplyToID, m.ReplyToChat, m.ThreadID, unix(m.EditTime), m.ForwardJSON, m.ReactionsJSON, m.Views, m.Forwards, m.RepliesCount, boolInt(m.Pinned)); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `insert into messages_fts(rowid,text,chat,sender,media) values((select rowid from messages where source_pk=?),?,?,?,?)`,
-			m.SourcePK, strings.TrimSpace(m.Text+" "+m.MediaTitle+" "+m.MetadataTitle+" "+m.MetadataURL), m.ChatName, m.SenderName, m.MediaType); err != nil {
+		if _, err := tx.ExecContext(ctx, `delete from messages_fts where rowid=(select rowid from messages where source_pk=?)`, m.SourcePK); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `insert into messages_fts(rowid,text,chat,sender,media) select rowid,trim(coalesce(text,'')||' '||coalesce(media_title,'')||' '||coalesce(metadata_title,'')||' '||coalesce(metadata_url,'')),coalesce(chat_name,''),coalesce(sender_name,''),coalesce(media_type,'') from messages where source_pk=?`, m.SourcePK); err != nil {
 			return err
 		}
 	}

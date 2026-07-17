@@ -88,11 +88,13 @@ func importTDataGo(ctx context.Context, sourcePath string, opts ImportOptions, d
 	})
 
 	var result ImportResult
+	var selfID int64
 	err = client.Run(ctx, func(ctx context.Context) error {
 		self, err := client.Self(ctx)
 		if err != nil {
 			return fmt.Errorf("telegram session is not authorized: %w", err)
 		}
+		selfID = self.ID
 		importer := &tdataImportSession{
 			raw:          tg.NewClient(client),
 			selfID:       self.ID,
@@ -108,6 +110,7 @@ func importTDataGo(ctx context.Context, sourcePath string, opts ImportOptions, d
 		return ImportResult{}, err
 	}
 	result.Stats.SourcePath = sourcePath
+	result.Stats.SourceIdentity = sourceIdentity("tdata", strconv.FormatInt(selfID, 10))
 	result.Stats.DBPath = dbPath
 	result.Stats.StartedAt = started
 	result.Stats.FinishedAt = time.Now().UTC()
