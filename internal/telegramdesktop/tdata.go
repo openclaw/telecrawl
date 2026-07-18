@@ -187,7 +187,11 @@ func (s *tdataImportSession) loadDialogs(ctx context.Context) ([]tdataDialog, er
 		if elem.Deleted() {
 			return nil
 		}
-		chatID := tdataPeerIDString(elem.Dialog.GetPeer(), s.selfID)
+		peerID, ok := tdataDialogPeer(elem.Dialog)
+		if !ok {
+			return nil
+		}
+		chatID := tdataPeerIDString(peerID, s.selfID)
 		if chatID == "" {
 			return nil
 		}
@@ -195,7 +199,7 @@ func (s *tdataImportSession) loadDialogs(ctx context.Context) ([]tdataDialog, er
 			return nil
 		}
 		seen[chatID] = struct{}{}
-		info := tdataPeerInfo(elem.Dialog.GetPeer(), elem.Entities, s.selfID)
+		info := tdataPeerInfo(peerID, elem.Entities, s.selfID)
 		folderID := tdataDialogFolderID(elem.Dialog)
 		if chatFilter != "" && !tdataChatFilterMatches(chatID, chatFilter) {
 			return nil
@@ -538,7 +542,11 @@ func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, [
 		}
 		if id, err := strconv.Atoi(folder.ID); err == nil && id != 0 {
 			_ = query.GetDialogs(s.raw).FolderID(id).BatchSize(tdataBatchSize).ForEach(ctx, func(ctx context.Context, elem dialogs.Elem) error {
-				chatID := tdataPeerIDString(elem.Dialog.GetPeer(), s.selfID)
+				peerID, ok := tdataDialogPeer(elem.Dialog)
+				if !ok {
+					return nil
+				}
+				chatID := tdataPeerIDString(peerID, s.selfID)
 				if chatID == "" {
 					return nil
 				}
@@ -577,6 +585,14 @@ func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, [
 		return numericStringLess(folderChats[i].FolderID, folderChats[j].FolderID)
 	})
 	return folders, folderChats
+}
+
+func tdataDialogPeer(dialog tg.DialogClass) (tg.PeerClass, bool) {
+	peer, ok := dialog.(interface{ GetPeer() tg.PeerClass })
+	if !ok {
+		return nil, false
+	}
+	return peer.GetPeer(), true
 }
 
 func (s *tdataImportSession) loadTopics(ctx context.Context, row tdataDialog) []store.Topic {

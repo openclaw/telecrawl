@@ -98,6 +98,18 @@ func TestSourceIdentityIsOrderIndependent(t *testing.T) {
 	}
 }
 
+func TestTDataDialogPeerHandlesPeerlessDialogs(t *testing.T) {
+	t.Parallel()
+	want := &tg.PeerUser{UserID: 42}
+	got, ok := tdataDialogPeer(&tg.Dialog{Peer: want})
+	if !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("dialog peer = %#v, %v; want %#v, true", got, ok, want)
+	}
+	if got, ok := tdataDialogPeer(&tg.DialogCommunity{}); ok || got != nil {
+		t.Fatalf("community peer = %#v, %v; want nil, false", got, ok)
+	}
+}
+
 func TestCopyImportedMediaArchivesByContentHash(t *testing.T) {
 	t.Parallel()
 	source := filepath.Join(t.TempDir(), "source-media")
