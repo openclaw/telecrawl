@@ -777,6 +777,9 @@ func tdataMediaTitle(msg tg.NotEmptyMessage) string {
 	}
 	switch media := m.Media.(type) {
 	case *tg.MessageMediaDocument:
+		if media.Document == nil {
+			return ""
+		}
 		doc, ok := media.Document.AsNotEmpty()
 		if !ok {
 			return ""
@@ -796,7 +799,7 @@ func tdataMediaSize(msg tg.NotEmptyMessage) int64 {
 		return 0
 	}
 	media, ok := m.Media.(*tg.MessageMediaDocument)
-	if !ok {
+	if !ok || media.Document == nil {
 		return 0
 	}
 	doc, ok := media.Document.AsNotEmpty()
