@@ -504,6 +504,135 @@ jq '.draft = false | .published_at = "2026-07-09T12:34:56Z"' \
   2222222222222222222222222222222222222222 \
   "$RELEASE_TEST_LOG.notes" "$tmp/release-snapshot.json" >/dev/null
 
+jq '.body += "\n\n"' "$tmp/draft-release.json" > "$tmp/trailing-newline-release.json"
+"$root/scripts/validate-release-record.sh" \
+  "$tmp/trailing-newline-release.json" v0.3.4 true \
+  2222222222222222222222222222222222222222 \
+  "$RELEASE_TEST_LOG.notes" "$tmp/release-snapshot.json" >/dev/null
+
+jq '.assets[0].digest = null' "$tmp/draft-release.json" > "$tmp/pending-digest-release.json"
+if "$root/scripts/validate-release-record.sh" \
+  "$tmp/pending-digest-release.json" v0.3.4 true \
+  2222222222222222222222222222222222222222 \
+  "$RELEASE_TEST_LOG.notes" >/dev/null 2>&1; then
+  echo "release record validator accepted a pending draft digest" >&2
+  exit 1
+else
+  pending_digest_status=$?
+fi
+[[ "$pending_digest_status" -eq 75 ]] || {
+  echo "release record validator did not classify an otherwise-valid pending draft digest" >&2
+  exit 1
+}
+
+jq '.name = "tampered" | .assets[0].digest = null' \
+  "$tmp/draft-release.json" > "$tmp/pending-digest-tampered-release.json"
+if "$root/scripts/validate-release-record.sh" \
+  "$tmp/pending-digest-tampered-release.json" v0.3.4 true \
+  2222222222222222222222222222222222222222 \
+  "$RELEASE_TEST_LOG.notes" >/dev/null 2>&1; then
+  echo "release record validator accepted tampered metadata with a pending digest" >&2
+  exit 1
+else
+  pending_digest_tampered_status=$?
+fi
+[[ "$pending_digest_tampered_status" -eq 1 ]] || {
+  echo "release record validator did not fail fast on non-digest metadata" >&2
+  exit 1
+}
+
+jq -s '.' "$tmp/pending-digest-release.json" > "$tmp/pending-digest-release-pages.json"
+sed -n '/^validate_release_record_file()/,/^}/p' \
+  "$root/scripts/release-local" > "$tmp/release-record-functions.sh"
+sed -n '/^release_record()/,/^}/p' \
+  "$root/scripts/release-local" >> "$tmp/release-record-functions.sh"
+cat > "$tmp/digest-poll-probe.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+root=$DIGEST_POLL_ROOT
+work_dir=$DIGEST_POLL_WORK
+repository=openclaw/telecrawl
+trusted_tag_commit=2222222222222222222222222222222222222222
+notes_file=$DIGEST_POLL_NOTES
+release_id=
+release_json=
+release_snapshot_file=
+
+extract_notes() { notes_file=$DIGEST_POLL_NOTES; }
+sleep() { printf '%s\n' "$1" >> "$DIGEST_POLL_SLEEP_LOG"; }
+github_api() {
+  printf '%s\n' "$*" >> "$DIGEST_POLL_API_LOG"
+  if [[ "${1:-}" == --paginate ]]; then
+    cat "$DIGEST_POLL_PENDING_PAGES"
+  elif [[ "${1:-}" == repos/openclaw/telecrawl/releases/42 ]]; then
+    cat "$DIGEST_POLL_READY_RECORD"
+  else
+    return 1
+  fi
+}
+
+# shellcheck source=/dev/null
+source "$DIGEST_POLL_FUNCTIONS"
+release_record v0.3.4 true
+[[ "$release_id" == 42 ]]
+jq -e '.assets | all(.[]; .digest | startswith("sha256:"))' \
+  "$release_snapshot_file" >/dev/null
+EOF
+chmod +x "$tmp/digest-poll-probe.sh"
+: > "$tmp/digest-poll-api.log"
+: > "$tmp/digest-poll-sleep.log"
+mkdir -p "$tmp/digest-poll-work"
+DIGEST_POLL_ROOT="$root" \
+  DIGEST_POLL_WORK="$tmp/digest-poll-work" \
+  DIGEST_POLL_NOTES="$RELEASE_TEST_LOG.notes" \
+  DIGEST_POLL_PENDING_PAGES="$tmp/pending-digest-release-pages.json" \
+  DIGEST_POLL_READY_RECORD="$tmp/draft-release.json" \
+  DIGEST_POLL_FUNCTIONS="$tmp/release-record-functions.sh" \
+  DIGEST_POLL_API_LOG="$tmp/digest-poll-api.log" \
+  DIGEST_POLL_SLEEP_LOG="$tmp/digest-poll-sleep.log" \
+  "$tmp/digest-poll-probe.sh"
+[[ "$(<"$tmp/digest-poll-sleep.log")" == 2 ]] || {
+  echo "release-local did not use the first digest backoff interval" >&2
+  exit 1
+}
+grep -Fxq 'repos/openclaw/telecrawl/releases/42' "$tmp/digest-poll-api.log" || {
+  echo "release-local did not poll the exact pending release record" >&2
+  exit 1
+}
+
+mkdir -p "$tmp/release-record-failure-root/scripts" "$tmp/release-record-failure-work"
+cat > "$tmp/release-record-failure-root/scripts/validate-release-record.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$tmp/release-record-failure-root/scripts/validate-release-record.sh"
+printf '%s\n' 'not JSON' > "$tmp/release-record-failure.json"
+cat > "$tmp/release-record-failure-probe.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+root=$RELEASE_RECORD_FAILURE_ROOT
+trusted_tag_commit=2222222222222222222222222222222222222222
+release_id=stale
+release_json=stale
+release_snapshot_file=stale
+extract_notes() { notes_file=$RELEASE_RECORD_FAILURE_NOTES; }
+# shellcheck source=/dev/null
+source "$RELEASE_RECORD_FAILURE_FUNCTIONS"
+if validate_release_record_file \
+  "$RELEASE_RECORD_FAILURE_JSON" v0.3.4 true \
+  "$RELEASE_RECORD_FAILURE_SNAPSHOT"; then
+  echo "release record validation ignored internal jq failure" >&2
+  exit 1
+fi
+EOF
+chmod +x "$tmp/release-record-failure-probe.sh"
+RELEASE_RECORD_FAILURE_ROOT="$tmp/release-record-failure-root" \
+  RELEASE_RECORD_FAILURE_NOTES="$RELEASE_TEST_LOG.notes" \
+  RELEASE_RECORD_FAILURE_FUNCTIONS="$tmp/release-record-functions.sh" \
+  RELEASE_RECORD_FAILURE_JSON="$tmp/release-record-failure.json" \
+  RELEASE_RECORD_FAILURE_SNAPSHOT="$tmp/release-record-failure-work/snapshot.json" \
+  "$tmp/release-record-failure-probe.sh" >/dev/null 2>&1
+
 assert_release_record_rejected() {
   local label=$1 filter=$2
   jq "$filter" "$tmp/draft-release.json" > "$tmp/tampered-release.json"
@@ -768,6 +897,7 @@ if grep -Fq 'release: published v0.3.4' "$tmp/publish-probe-output.log"; then
   exit 1
 fi
 homebrew_function=$(sed -n '/^update_homebrew()/,/^}/p' "$root/scripts/release-local")
+local_homebrew_function=$(sed -n '/^verify_local_homebrew_install()/,/^}/p' "$root/scripts/release-local")
 homebrew_revalidate_function=$(sed -n '/^revalidate_homebrew_source()/,/^}/p' "$root/scripts/release-local")
 handoff_revalidate_function=$(sed -n '/^revalidate_homebrew_handoff_snapshot()/,/^}/p' "$root/scripts/release-local")
 snapshot_match_function=$(sed -n '/^require_release_snapshot_matches_directory()/,/^}/p' "$root/scripts/release-local")
@@ -787,23 +917,24 @@ grep -Fq -- '--ref "$trusted_tap_branch"' <<<"$homebrew_function"
 grep -Fq "'.workflow_id'" <<<"$homebrew_function"
 grep -Fq "'.path'" <<<"$homebrew_function"
 grep -Fq 'contents/Formula/telecrawl.rb?ref=$completed_tap_commit' <<<"$homebrew_function"
-grep -Fq 'env -i "${homebrew_env[@]}" "$brew_bin" info --json=v2' <<<"$homebrew_function"
-grep -Fq 'env -i "${homebrew_env[@]}" "$brew_bin" install --formula' <<<"$homebrew_function"
-grep -Fq 'env -i "${homebrew_env[@]}" "$brew_bin" test telecrawl' <<<"$homebrew_function"
-grep -Fq 'cmp -s "$handoff_candidate" "$installed_binary"' <<<"$homebrew_function"
-grep -Fq '"$installed_binary" "$native_arch" "$version" static' <<<"$homebrew_function"
-grep -Fq 'assert_trusted_release_helpers_clean' <<<"$homebrew_function"
-install_line=$(grep -nF '"$brew_bin" install --formula' <<<"$homebrew_function" | cut -d: -f1)
-installed_cmp_line=$(grep -nF 'cmp -s "$handoff_candidate" "$installed_binary"' <<<"$homebrew_function" | cut -d: -f1)
-installed_static_line=$(grep -nF '"$installed_binary" "$native_arch" "$version" static' <<<"$homebrew_function" | cut -d: -f1)
-brew_test_line=$(grep -nF '"$brew_bin" test telecrawl' <<<"$homebrew_function" | cut -d: -f1)
-final_tap_line=$(grep -nF 'require_tap_default_at "$trusted_tap_branch" "$completed_tap_commit"' <<<"$homebrew_function" | cut -d: -f1)
-homebrew_success_line=$(grep -nF 'echo "release: Homebrew formula and clean install passed' <<<"$homebrew_function" | cut -d: -f1)
+grep -Fq 'env -i "${homebrew_env[@]}" "$brew_bin" info --json=v2' <<<"$local_homebrew_function"
+grep -Fq 'env -i "${homebrew_env[@]}" "$brew_bin" install --formula' <<<"$local_homebrew_function"
+grep -Fq 'env -i "${homebrew_env[@]}" "$brew_bin" test telecrawl' <<<"$local_homebrew_function"
+grep -Fq 'cmp -s "$handoff_candidate" "$installed_binary"' <<<"$local_homebrew_function"
+grep -Fq '"$installed_binary" "$native_arch" "$version" static' <<<"$local_homebrew_function"
+grep -Fq 'assert_trusted_release_helpers_clean' <<<"$local_homebrew_function"
+grep -Fq 'Homebrew requires formulae to be in a tap' <<<"$local_homebrew_function"
+if grep -Fq 'return 75' <<<"$local_homebrew_function"; then
+  echo "local Homebrew proof uses a successful skip status as a failure code" >&2
+  exit 1
+fi
+install_line=$(grep -nF '"$brew_bin" install --formula' <<<"$local_homebrew_function" | cut -d: -f1)
+installed_cmp_line=$(grep -nF 'cmp -s "$handoff_candidate" "$installed_binary"' <<<"$local_homebrew_function" | cut -d: -f1)
+installed_static_line=$(grep -nF '"$installed_binary" "$native_arch" "$version" static' <<<"$local_homebrew_function" | cut -d: -f1)
+brew_test_line=$(grep -nF '"$brew_bin" test telecrawl' <<<"$local_homebrew_function" | cut -d: -f1)
 [[ "$install_line" -lt "$installed_cmp_line" &&
   "$installed_cmp_line" -lt "$installed_static_line" &&
-  "$installed_static_line" -lt "$brew_test_line" &&
-  "$brew_test_line" -lt "$final_tap_line" &&
-  "$final_tap_line" -lt "$homebrew_success_line" ]] || {
+  "$installed_static_line" -lt "$brew_test_line" ]] || {
   echo "Homebrew candidate executes before installed-byte and signature verification" >&2
   exit 1
 }
@@ -853,16 +984,86 @@ grep -Fq "'telecrawl: update formula for %s\\n\\nSource-Repository: %s\\nSource-
 grep -Fq 'repos/openclaw/homebrew-tap/git/commits/$completed_tap_commit' <<<"$homebrew_function"
 grep -Fq "'.parents[0].sha // empty'" <<<"$homebrew_function"
 
-brew_test_line=$(grep -nF '"$brew_bin" test telecrawl' <<<"$homebrew_function" | cut -d: -f1)
+local_homebrew_line=$(grep -nF 'verify_local_homebrew_install' <<<"$homebrew_function" | cut -d: -f1)
+if grep -Fq 'if verify_local_homebrew_install' <<<"$homebrew_function"; then
+  echo "Homebrew helper runs in a conditional that suppresses Bash errexit" >&2
+  exit 1
+fi
 post_test_helper_line=$(grep -nF 'assert_trusted_release_helpers_clean' <<<"$homebrew_function" | tail -1 | cut -d: -f1)
 post_test_release_line=$(grep -nF 'revalidate_homebrew_source' <<<"$homebrew_function" | tail -1 | cut -d: -f1)
 final_tap_line=$(grep -nF 'require_tap_default_at "$trusted_tap_branch" "$completed_tap_commit"' <<<"$homebrew_function" | cut -d: -f1)
 homebrew_success_line=$(grep -nF 'echo "release: Homebrew formula and clean install passed' <<<"$homebrew_function" | cut -d: -f1)
-[[ "$brew_test_line" -lt "$post_test_helper_line" &&
+[[ "$local_homebrew_line" -lt "$post_test_helper_line" &&
   "$post_test_helper_line" -lt "$post_test_release_line" &&
   "$post_test_release_line" -lt "$final_tap_line" &&
   "$final_tap_line" -lt "$homebrew_success_line" ]] || {
   echo "Homebrew closeout does not revalidate exact source state after candidate execution" >&2
+  exit 1
+}
+
+printf '%s\n' "$local_homebrew_function" > "$tmp/local-homebrew-function.sh"
+mkdir -p "$tmp/untapped-homebrew-bin" "$tmp/untapped-homebrew-work"
+cat > "$tmp/untapped-homebrew-bin/brew" <<'EOF'
+#!/bin/bash
+case "${1:-}" in
+  list) exit 0 ;;
+  info)
+    printf '%s\n' '{"formulae":[{"name":"telecrawl","versions":{"stable":"0.3.4"}}]}'
+    ;;
+  install)
+    echo 'Error: Homebrew requires formulae to be in a tap' >&2
+    exit 1
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$tmp/untapped-homebrew-bin/brew"
+cat > "$tmp/untapped-homebrew-probe.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+work_dir=$UNTAPPED_HOMEBREW_WORK
+root=$UNTAPPED_HOMEBREW_ROOT
+local_homebrew_skipped=false
+# shellcheck source=/dev/null
+source "$UNTAPPED_HOMEBREW_FUNCTION"
+verify_local_homebrew_install formula.rb 0.3.4 artifacts candidate arm64
+[[ "$local_homebrew_skipped" == true ]]
+EOF
+chmod +x "$tmp/untapped-homebrew-probe.sh"
+if ! PATH="$tmp/untapped-homebrew-bin:$PATH" \
+  UNTAPPED_HOMEBREW_WORK="$tmp/untapped-homebrew-work" \
+  UNTAPPED_HOMEBREW_ROOT="$root" \
+  UNTAPPED_HOMEBREW_FUNCTION="$tmp/local-homebrew-function.sh" \
+  "$tmp/untapped-homebrew-probe.sh" > "$tmp/untapped-homebrew.log" 2>&1; then
+  cat "$tmp/untapped-homebrew.log" >&2
+  echo "local Homebrew proof did not accept the exact untapped-formula skip" >&2
+  exit 1
+fi
+grep -Fq 'local Homebrew install/test skipped' "$tmp/untapped-homebrew.log" || {
+  echo "local Homebrew proof did not explain the untapped-formula skip" >&2
+  exit 1
+}
+
+mkdir -p "$tmp/failing-homebrew-bin" "$tmp/failing-homebrew-work"
+cat > "$tmp/failing-homebrew-bin/brew" <<'EOF'
+#!/bin/bash
+if [[ "${1:-}" == list ]]; then
+  echo 'simulated Homebrew inventory failure' >&2
+  exit 2
+fi
+exit 0
+EOF
+chmod +x "$tmp/failing-homebrew-bin/brew"
+if PATH="$tmp/failing-homebrew-bin:$PATH" \
+  UNTAPPED_HOMEBREW_WORK="$tmp/failing-homebrew-work" \
+  UNTAPPED_HOMEBREW_ROOT="$root" \
+  UNTAPPED_HOMEBREW_FUNCTION="$tmp/local-homebrew-function.sh" \
+  "$tmp/untapped-homebrew-probe.sh" > "$tmp/failing-homebrew.log" 2>&1; then
+  echo "local Homebrew proof treated an inventory failure as formula absence" >&2
+  exit 1
+fi
+grep -Fq 'Homebrew installed-formula inventory failed' "$tmp/failing-homebrew.log" || {
+  echo "local Homebrew proof did not report its inventory failure" >&2
   exit 1
 }
 grep -Fq '"$trusted_tag_object" == "$expected_tag_object"' <<<"$homebrew_revalidate_function"
