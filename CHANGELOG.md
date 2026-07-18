@@ -1,18 +1,31 @@
 # Changelog
 
-## [0.3.4] - Unreleased
+## [0.3.4] - 2026-07-17
 
-### Fixed
+### Highlights
 
-- Preserve chats and messages outside bounded import windows by merging imports by default, pin and verify source identity, and require explicit `--replace` for destructive archive replacement.
+- Ship official macOS binaries signed by the OpenClaw Foundation, notarized by Apple, and independently verified on native Apple Silicon and Intel hosts before publication.
+- Preserve older archive history during routine bounded imports by merging new data by default and reserving destructive replacement for explicit `--replace` restores.
+- Complete Telegram Desktop imports safely when expired or service-style document media has no document payload.
+- Harden release provenance from the signed source tag through verifier-approved, identity- and digest-bound assets and the final Homebrew handoff.
 
-### Changed
+### Archive safety
 
-- Notarize every official macOS release binary with the OpenClaw Foundation Developer ID and verify exact signing metadata, the canonical designated requirement, strict code validity, and online notarization before GoReleaser archives it.
-- Create releases as drafts, require independent native Apple Silicon and Intel verification before publication, then require a distinct published-release verifier before Homebrew updates.
-- Pin signed release tags to the repository release key and exact tag object/commit, bind every binary-only platform archive to the exact Go main package, toolchain, target, and tag revision, reproducibly rebuild non-Darwin payloads, and source publish notes from the revalidated tag at each release gate.
-- Bind publication and Homebrew handoff bytes to the verifier-accepted numeric release record and exact asset IDs, names, sizes, and digests, then require the generic tap run and commit provenance to match the protected source exactly.
-- Reject ambient Go build controls and executable hooks in official builds, pin verifier API reads to the Telecrawl repository, and run native candidates only after frozen static, reproducible-rebuild, and protected-helper proof completes.
+- Preserve chats and messages outside bounded import windows, pin and verify source identity, and keep full archive replacement behind explicit `--replace`. (#21)
+- Avoid nil-pointer panics while importing Telegram Desktop document media without a document payload. (#22; thanks @sw1pp3r)
+
+### Signed release pipeline
+
+- Notarize every official macOS binary before GoReleaser archives it, then verify exact Foundation signing metadata, the canonical designated requirement, strict code validity, and online notarization.
+- Create releases as drafts, require independent native Apple Silicon and Intel verification before publication, and require a distinct published-release verifier before Homebrew updates.
+- Pin signed release tags to the repository release key and exact tag object and commit, bind every platform archive to the expected Go main package, toolchain, target, and revision, and reproducibly rebuild non-Darwin payloads.
+- Source release notes from the revalidated tag, preserve the tag and notes through draft publication, and wait for verifier runs before accepting their step-bound proof.
+- Bind publication and Homebrew handoff bytes to the verifier-approved release record and exact asset identities, sizes, and digests, then require tap workflow and commit provenance to match the protected source.
+- Reject ambient Go build controls and executable hooks, pin verifier API reads to Telecrawl, and run native candidates only after frozen static, reproducible-build, and protected-helper proof.
+
+### Dependencies
+
+- Update CrawlKit to v0.14.3, gotd to v0.161.0, modernc SQLite to v1.54.0, and `golang.org/x/crypto` to v0.54.0, with all direct dependencies on their latest stable releases. (#19, #23)
 
 ## [0.3.3] - 2026-07-09
 
