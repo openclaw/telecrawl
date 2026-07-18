@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.5] - Unreleased
+
+### Fixed
+
+- Harden release closeout against delayed GitHub asset digests, GoReleaser-added trailing note newlines, draft PATCH tag resets, and Homebrew versions that reject untapped formula files.
+
 ## [0.3.4] - 2026-07-17
 
 ### Highlights

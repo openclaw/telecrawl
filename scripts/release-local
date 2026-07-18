@@ -309,27 +309,39 @@ require_remote_signed_tag() {
 
 validate_release_record_file() {
   local release_file=$1 tag=$2 expected_draft=$3 snapshot_file=$4
-  local expected_snapshot=${5:-}
+  local expected_snapshot=${5:-} validation_status
 
-  extract_notes "$tag"
+  extract_notes "$tag" || return $?
   if [[ -n "$expected_snapshot" ]]; then
-    "$root/scripts/validate-release-record.sh" \
+    if "$root/scripts/validate-release-record.sh" \
       "$release_file" "$tag" "$expected_draft" "$trusted_tag_commit" \
-      "$notes_file" "$expected_snapshot" > "$snapshot_file"
+      "$notes_file" "$expected_snapshot" > "$snapshot_file"; then
+      :
+    else
+      validation_status=$?
+      return "$validation_status"
+    fi
   else
-    "$root/scripts/validate-release-record.sh" \
+    if "$root/scripts/validate-release-record.sh" \
       "$release_file" "$tag" "$expected_draft" "$trusted_tag_commit" \
-      "$notes_file" > "$snapshot_file"
+      "$notes_file" > "$snapshot_file"; then
+      :
+    else
+      validation_status=$?
+      return "$validation_status"
+    fi
   fi
 
-  release_id=$(jq -r '.id' "$release_file")
-  release_json=$(jq -c '[.]' "$release_file")
+  release_id=$(jq -r '.id' "$release_file") || return $?
+  release_json=$(jq -c '[.]' "$release_file") || return $?
   release_snapshot_file=$snapshot_file
 }
 
 release_record() {
   local tag=$1 expected_draft=$2 expected_snapshot=${3:-}
-  local matches_file record_file snapshot_file
+  local matches_file record_file snapshot_file validation_status pending_release_id delay
+  local digests_ready=false
+  local -a digest_poll_delays=(2 4 8 16 32 60 60 60 60)
 
   github_api --paginate "repos/$repository/releases?per_page=100" > "$work_dir/release-pages.json"
   matches_file="$work_dir/release-matches.json"
@@ -344,8 +356,34 @@ release_record() {
   record_file="$work_dir/release-record.json"
   snapshot_file="$work_dir/release-snapshot.json"
   jq '.[0]' "$matches_file" > "$record_file"
-  validate_release_record_file \
-    "$record_file" "$tag" "$expected_draft" "$snapshot_file" "$expected_snapshot"
+  if validate_release_record_file \
+    "$record_file" "$tag" "$expected_draft" "$snapshot_file" "$expected_snapshot"; then
+    return
+  else
+    validation_status=$?
+  fi
+  [[ "$validation_status" -eq 75 && "$expected_draft" == true && -z "$expected_snapshot" ]] || {
+    return "$validation_status"
+  }
+
+  pending_release_id=$(jq -r '.id' "$record_file")
+  for delay in "${digest_poll_delays[@]}"; do
+    echo "release: draft asset digests pending; retrying in $delay seconds" >&2
+    sleep "$delay"
+    github_api "repos/$repository/releases/$pending_release_id" > "$record_file"
+    if validate_release_record_file \
+      "$record_file" "$tag" true "$snapshot_file"; then
+      digests_ready=true
+      break
+    else
+      validation_status=$?
+    fi
+    [[ "$validation_status" -eq 75 ]] || return "$validation_status"
+  done
+  [[ "$digests_ready" == true ]] || {
+    echo "release: draft asset digests did not materialize within five minutes" >&2
+    return 1
+  }
 }
 
 extract_notes() {
@@ -661,6 +699,94 @@ verify_homebrew_formula() {
   done
 }
 
+verify_local_homebrew_install() {
+  local formula_file=$1 version=$2 handoff_dir=$3 handoff_candidate=$4 native_arch=$5
+  local brew_bin brew_dir brew_home formula_info brew_log installed_formulae installed_prefix installed_binary
+  local handoff_inventory_final
+  local -a homebrew_env
+
+  if ! brew_bin=$(command -v brew); then
+    echo "release: local Homebrew install/test requires brew" >&2
+    return 1
+  fi
+  brew_dir=$(dirname "$brew_bin")
+  brew_home="$work_dir/homebrew-home"
+  mkdir -p "$brew_home"
+  homebrew_env=(
+    "CI=1"
+    "GIT_CONFIG_GLOBAL=/dev/null"
+    "GIT_CONFIG_NOSYSTEM=1"
+    "GIT_TERMINAL_PROMPT=0"
+    "HOME=$brew_home"
+    "HOMEBREW_NO_AUTO_UPDATE=1"
+    "HOMEBREW_NO_ENV_HINTS=1"
+    "PATH=$brew_dir:/usr/bin:/bin:/usr/sbin:/sbin"
+  )
+  installed_formulae="$work_dir/homebrew-installed-formulae.txt"
+  brew_log="$work_dir/homebrew-local.log"
+  if ! env -i "${homebrew_env[@]}" "$brew_bin" list --formula --versions \
+    > "$installed_formulae" 2> "$brew_log"; then
+    cat "$brew_log" >&2
+    echo "release: Homebrew installed-formula inventory failed" >&2
+    return 1
+  fi
+  if grep -Eq '^telecrawl([[:space:]]|$)' "$installed_formulae"; then
+    echo "release: Homebrew clean-install proof requires telecrawl to be absent" >&2
+    return 1
+  fi
+
+  formula_info="$work_dir/formula-info.json"
+  if ! env -i "${homebrew_env[@]}" "$brew_bin" info --json=v2 "$formula_file" \
+    > "$formula_info" 2> "$brew_log"; then
+    if grep -Fq 'Homebrew requires formulae to be in a tap' "$brew_log"; then
+      echo "release: local Homebrew install/test skipped: this Homebrew requires formulae to be in a tap" >&2
+      local_homebrew_skipped=true
+      return
+    fi
+    cat "$brew_log" >&2
+    echo "release: local Homebrew formula evaluation failed" >&2
+    return 1
+  fi
+  [[ "$(jq -r '.formulae | length' "$formula_info")" == 1 &&
+    "$(jq -r '.formulae[0].name // empty' "$formula_info")" == telecrawl &&
+    "$(jq -r '.formulae[0].versions.stable // empty' "$formula_info")" == "$version" ]] || {
+    echo "release: Homebrew did not evaluate the verified formula as Telecrawl $version" >&2
+    return 1
+  }
+  if ! env -i "${homebrew_env[@]}" "$brew_bin" install --formula "$formula_file" \
+    > "$brew_log" 2>&1; then
+    if grep -Fq 'Homebrew requires formulae to be in a tap' "$brew_log"; then
+      echo "release: local Homebrew install/test skipped: this Homebrew requires formulae to be in a tap" >&2
+      local_homebrew_skipped=true
+      return
+    fi
+    cat "$brew_log" >&2
+    echo "release: local Homebrew formula installation failed" >&2
+    return 1
+  fi
+  cat "$brew_log"
+  installed_prefix=$(env -i "${homebrew_env[@]}" "$brew_bin" --prefix telecrawl)
+  installed_binary="$installed_prefix/bin/telecrawl"
+  handoff_inventory_final="$work_dir/public-release-handoff.inventory.final.sha256"
+  env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    "$root/scripts/freeze-release-inventory.sh" \
+    "v$version" "$handoff_dir" > "$handoff_inventory_final"
+  cmp "$handoff_candidate.inventory.sha256" "$handoff_inventory_final"
+  [[ "$(shasum -a 256 "$handoff_candidate" | awk '{print $1}')" == "$(<"$handoff_candidate.sha256")" ]] || {
+    echo "release: verified Homebrew handoff candidate changed" >&2
+    return 1
+  }
+  assert_trusted_release_helpers_clean
+  cmp -s "$handoff_candidate" "$installed_binary" || {
+    echo "release: installed Homebrew binary differs from the verified archive member" >&2
+    return 1
+  }
+  env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    "$root/scripts/verify-macos-binary.sh" \
+    "$installed_binary" "$native_arch" "$version" static
+  env -i "${homebrew_env[@]}" "$brew_bin" test telecrawl
+}
+
 revalidate_homebrew_source() {
   local tag=$1 expected_tag_object=$2 expected_tag_commit=$3
   local expected_release_snapshot=$4 expected_snapshot_hash=$5 actual_snapshot_hash
@@ -969,8 +1095,8 @@ publish_release() {
     "$prepatch_record" "$tag" true "$work_dir/prepublish-snapshot.json" "$accepted_snapshot"
   verify_release_notes "$tag" draft
 
-  # GitHub can rewrite a draft's tag_name to untagged-* for a partial PATCH.
-  # Send every canonical mutable release field together at publication.
+  # PATCHing only a draft body resets tag_name to an untagged-* placeholder.
+  # Always send tag_name, name, and target_commitish with the mutable fields.
   publish_payload="$work_dir/publish-payload.json"
   extract_notes "$tag"
   jq -n \
@@ -1028,36 +1154,16 @@ publish_release() {
 update_homebrew() {
   local tag=$1 verifier_run request_id expected_title expected_tap_run_path run_id version
   local public_dir handoff_dir source_dir go_bin native_goarch native_arch
-  local public_candidate handoff_candidate handoff_inventory_final
+  local public_candidate handoff_candidate
   local accepted_tag_object accepted_tag_commit accepted_release_snapshot accepted_snapshot_hash
   local verifier_release_snapshot
   local darwin_amd64_sha256 darwin_arm64_sha256 linux_amd64_sha256 linux_arm64_sha256
-  local formula_file formula_info installed_prefix installed_binary
-  local brew_bin brew_dir brew_home comparison comparison_status completed_tap_commit tap_run_json
+  local formula_file comparison comparison_status completed_tap_commit tap_run_json
   local tap_commit_json expected_commit_message
-  local -a homebrew_env
   validate_tag "$tag"
-  require_tools awk brew cmp cp git gh go grep jq lipo sed shasum tar
+  require_tools awk cmp cp git gh go grep jq lipo sed shasum tar
   unset GH_TOKEN GITHUB_TOKEN
-  brew_bin=$(command -v brew)
-  brew_dir=$(dirname "$brew_bin")
-  brew_home="$work_dir/homebrew-home"
-  mkdir -p "$brew_home"
-  homebrew_env=(
-    "CI=1"
-    "GIT_CONFIG_GLOBAL=/dev/null"
-    "GIT_CONFIG_NOSYSTEM=1"
-    "GIT_TERMINAL_PROMPT=0"
-    "HOME=$brew_home"
-    "HOMEBREW_NO_AUTO_UPDATE=1"
-    "HOMEBREW_NO_ENV_HINTS=1"
-    "PATH=$brew_dir:/usr/bin:/bin:/usr/sbin:/sbin"
-  )
   require_tap_hash_contract
-  if env -i "${homebrew_env[@]}" "$brew_bin" list --formula --versions telecrawl 2>/dev/null | grep -q .; then
-    echo "release: Homebrew clean-install proof requires telecrawl to be absent" >&2
-    exit 1
-  fi
   require_remote_signed_tag "$tag" false
   release_record "$tag" false
   verify_release_notes "$tag" published
@@ -1220,35 +1326,8 @@ update_homebrew() {
     "$darwin_amd64_sha256" "$darwin_arm64_sha256" \
     "$linux_amd64_sha256" "$linux_arm64_sha256"
 
-  formula_info="$work_dir/formula-info.json"
-  env -i "${homebrew_env[@]}" "$brew_bin" info --json=v2 "$formula_file" > "$formula_info"
-  [[ "$(jq -r '.formulae | length' "$formula_info")" == 1 &&
-    "$(jq -r '.formulae[0].name // empty' "$formula_info")" == telecrawl &&
-    "$(jq -r '.formulae[0].versions.stable // empty' "$formula_info")" == "$version" ]] || {
-    echo "release: Homebrew did not evaluate the verified formula as Telecrawl $version" >&2
-    exit 1
-  }
-  env -i "${homebrew_env[@]}" "$brew_bin" install --formula "$formula_file"
-  installed_prefix=$(env -i "${homebrew_env[@]}" "$brew_bin" --prefix telecrawl)
-  installed_binary="$installed_prefix/bin/telecrawl"
-  handoff_inventory_final="$work_dir/public-release-handoff.inventory.final.sha256"
-  env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
-    "$root/scripts/freeze-release-inventory.sh" \
-    "$tag" "$handoff_dir" > "$handoff_inventory_final"
-  cmp "$handoff_candidate.inventory.sha256" "$handoff_inventory_final"
-  [[ "$(shasum -a 256 "$handoff_candidate" | awk '{print $1}')" == "$(<"$handoff_candidate.sha256")" ]] || {
-    echo "release: verified Homebrew handoff candidate changed" >&2
-    exit 1
-  }
-  assert_trusted_release_helpers_clean
-  cmp -s "$handoff_candidate" "$installed_binary" || {
-    echo "release: installed Homebrew binary differs from the verified archive member" >&2
-    exit 1
-  }
-  env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
-    "$root/scripts/verify-macos-binary.sh" \
-    "$installed_binary" "$native_arch" "$version" static
-  env -i "${homebrew_env[@]}" "$brew_bin" test telecrawl
+  verify_local_homebrew_install \
+    "$formula_file" "$version" "$handoff_dir" "$handoff_candidate" "$native_arch"
   # Candidate execution cannot authorize later mutable helper bytes. Recheck the
   # protected checkout first, then require the exact accepted public source and
   # verifier proof to remain live before closeout.
@@ -1257,7 +1336,11 @@ update_homebrew() {
     "$tag" "$accepted_tag_object" "$accepted_tag_commit" \
     "$accepted_release_snapshot" "$accepted_snapshot_hash"
   require_tap_default_at "$trusted_tap_branch" "$completed_tap_commit"
-  echo "release: Homebrew formula and clean install passed after native published verifier run $verifier_run"
+  if [[ "$local_homebrew_skipped" == true ]]; then
+    echo "release: protected Homebrew handoff and hosted formula/checksum contract passed after native published verifier run $verifier_run; local install/test skipped"
+  else
+    echo "release: Homebrew formula and clean install passed after native published verifier run $verifier_run"
+  fi
 }
 
 mode=${1:-}
@@ -1290,6 +1373,7 @@ trap cleanup_release_work_dir EXIT
 release_json=
 release_id=
 release_snapshot_file=
+local_homebrew_skipped=false
 
 case "$mode" in
   pilot) pilot_release "$1" ;;

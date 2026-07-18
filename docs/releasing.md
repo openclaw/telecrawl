@@ -59,6 +59,11 @@ Homebrew.
 
 `verify-draft` dispatches `.github/workflows/release-assets.yml` from the
 current default branch through the versioned `2026-03-10` REST endpoint. It
+waits up to about five minutes for GitHub to materialize missing draft-asset
+SHA-256 digests, but only when the otherwise exact release record is valid.
+Any other metadata or asset mismatch still fails immediately. Release-note
+comparison ignores trailing newlines added by GoReleaser and remains byte-exact
+for all other content. It
 requires the response's exact `workflow_run_id` and URLs, proves that ID did not
 exist before the request, validates that exact run record including canonical
 plain path `.github/workflows/release-assets.yml`, and retries full validation
@@ -153,7 +158,10 @@ The post-run default must be its single direct child, with subject `telecrawl:
 update formula for <tag>` and ordered `Source-Repository`, `Source-Tag-Object`,
 `Source-Tag-Commit`, and `Request-ID` trailers exactly matching the handoff.
 Formula evaluation and clean install use a minimal credential-free
-environment. The installed binary must equal the verified archive member
+environment when the local Homebrew accepts a formula file outside a tap. If
+that Homebrew requires formulae to be in a tap, the redundant local install and
+test are reported as skipped after the protected hosted handoff and exact
+formula/checksum verification succeed. When run, the installed binary must equal the verified archive member
 byte-for-byte, then pass the full native architecture, Foundation
 authority, Team, identifier, runtime, timestamp, canonical designated
 requirement, online notarization, and version checks again before `brew test`
