@@ -10,7 +10,10 @@ create table if not exists chats (
 	unread_count integer not null default 0,
 	message_count integer not null default 0,
 	folder_id text,
-	forum integer not null default 0
+	forum integer not null default 0,
+	deleted_at integer,
+	deletion_source text,
+	deletion_reason text
 );
 
 create table if not exists folders (
@@ -18,13 +21,19 @@ create table if not exists folders (
 	title text,
 	emoticon text,
 	color integer not null default 0,
-	flags_json text
+	flags_json text,
+	deleted_at integer,
+	deletion_source text,
+	deletion_reason text
 );
 
 create table if not exists folder_chats (
 	folder_id text not null,
 	chat_jid text not null,
 	position integer not null default 0,
+	deleted_at integer,
+	deletion_source text,
+	deletion_reason text,
 	primary key (folder_id, chat_jid)
 );
 
@@ -42,6 +51,9 @@ create table if not exists topics (
 	closed integer not null default 0,
 	hidden integer not null default 0,
 	last_message_at integer,
+	deleted_at integer,
+	deletion_source text,
+	deletion_reason text,
 	primary key (chat_jid, topic_id)
 );
 
@@ -57,14 +69,20 @@ create table if not exists contacts (
 	lid text,
 	about_text text,
 	avatar_path text,
-	updated_at integer
+	updated_at integer,
+	deleted_at integer,
+	deletion_source text,
+	deletion_reason text
 );
 
 create table if not exists groups (
 	jid text primary key,
 	name text,
 	owner_jid text,
-	created_at integer
+	created_at integer,
+	deleted_at integer,
+	deletion_source text,
+	deletion_reason text
 );
 
 create table if not exists group_participants (
@@ -74,12 +92,16 @@ create table if not exists group_participants (
 	first_name text,
 	is_admin integer not null default 0,
 	is_active integer not null default 0,
+	deleted_at integer,
+	deletion_source text,
+	deletion_reason text,
 	primary key (group_jid, user_jid)
 );
 
 create table if not exists messages (
 	rowid integer primary key autoincrement,
-	source_pk integer not null unique,
+	event_id text not null unique,
+	source_pk integer not null,
 	chat_jid text not null,
 	chat_name text,
 	msg_id text not null,
@@ -110,7 +132,22 @@ create table if not exists messages (
 	views integer not null default 0,
 	forwards integer not null default 0,
 	replies_count integer not null default 0,
-	pinned integer not null default 0
+	pinned integer not null default 0,
+	deleted_at integer,
+	deletion_source text,
+	deletion_reason text
+);
+
+create table if not exists message_revisions (
+	event_id text primary key,
+	message_event_id text not null,
+	event_type text not null,
+	payload_json text not null,
+	event_at integer not null,
+	observed_at integer not null,
+	event_source text,
+	reason text not null,
+	predecessor_event_id text
 );
 
 create table if not exists sync_state (
@@ -118,16 +155,21 @@ create table if not exists sync_state (
 	value text not null,
 	updated_at integer not null
 );
+
+create virtual table if not exists messages_fts using fts5(text, chat, sender, media);
 `
 
 const indexSQL = `
 create index if not exists idx_messages_chat_ts on messages(chat_jid, ts);
+create index if not exists idx_messages_chat_deleted_ts on messages(chat_jid, deleted_at, ts);
 create index if not exists idx_messages_chat_msg on messages(chat_jid, msg_id);
 create index if not exists idx_messages_chat_topic_ts on messages(chat_jid, topic_id, ts);
 create index if not exists idx_topics_chat on topics(chat_jid, last_message_at);
 create index if not exists idx_folder_chats_chat on folder_chats(chat_jid);
 create index if not exists idx_messages_ts on messages(ts);
 create index if not exists idx_messages_sender on messages(sender_jid);
+create index if not exists idx_messages_source_identity on messages(source_pk, chat_jid, msg_id);
+create unique index if not exists idx_messages_event_id on messages(event_id);
+create index if not exists idx_message_revisions_message on message_revisions(message_event_id, event_at, event_id);
 
-create virtual table if not exists messages_fts using fts5(text, chat, sender, media);
 `

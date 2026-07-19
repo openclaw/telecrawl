@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 type Store struct {
 	db   *sql.DB
@@ -58,7 +59,16 @@ type Status struct {
 	LastSource     string    `json:"last_source,omitempty"`
 }
 
+// Tombstone records an explicit source deletion. A missing row in an import is
+// never enough to populate these fields.
+type Tombstone struct {
+	DeletedAt      time.Time `json:"deleted_at,omitzero"`
+	DeletionSource string    `json:"deletion_source,omitempty"`
+	DeletionReason string    `json:"deletion_reason,omitempty"`
+}
+
 type Chat struct {
+	Tombstone
 	JID           string    `json:"jid"`
 	Kind          string    `json:"kind"`
 	Name          string    `json:"name,omitempty"`
@@ -71,6 +81,7 @@ type Chat struct {
 }
 
 type Folder struct {
+	Tombstone
 	ID        string `json:"id"`
 	Title     string `json:"title,omitempty"`
 	Emoticon  string `json:"emoticon,omitempty"`
@@ -79,12 +90,14 @@ type Folder struct {
 }
 
 type FolderChat struct {
+	Tombstone
 	FolderID string `json:"folder_id"`
 	ChatJID  string `json:"chat_jid"`
 	Position int    `json:"position"`
 }
 
 type Topic struct {
+	Tombstone
 	ChatJID              string    `json:"chat_jid"`
 	TopicID              string    `json:"topic_id"`
 	Title                string    `json:"title,omitempty"`
@@ -101,6 +114,7 @@ type Topic struct {
 }
 
 type Contact struct {
+	Tombstone
 	JID          string    `json:"jid"`
 	PeerType     string    `json:"peer_type,omitempty"`
 	Phone        string    `json:"phone,omitempty"`
@@ -116,6 +130,7 @@ type Contact struct {
 }
 
 type Group struct {
+	Tombstone
 	JID       string    `json:"jid"`
 	Name      string    `json:"name,omitempty"`
 	OwnerJID  string    `json:"owner_jid,omitempty"`
@@ -123,6 +138,7 @@ type Group struct {
 }
 
 type GroupParticipant struct {
+	Tombstone
 	GroupJID    string `json:"group_jid"`
 	UserJID     string `json:"user_jid"`
 	ContactName string `json:"contact_name,omitempty"`
@@ -132,6 +148,8 @@ type GroupParticipant struct {
 }
 
 type Message struct {
+	Tombstone
+	EventID       string    `json:"event_id,omitempty"`
 	SourcePK      int64     `json:"source_pk"`
 	ChatJID       string    `json:"chat_jid"`
 	ChatName      string    `json:"chat_name,omitempty"`
@@ -165,6 +183,18 @@ type Message struct {
 	RepliesCount  int       `json:"replies_count,omitempty"`
 	Pinned        bool      `json:"pinned,omitempty"`
 	Snippet       string    `json:"snippet,omitempty"`
+}
+
+type MessageRevision struct {
+	EventID            string    `json:"event_id"`
+	MessageEventID     string    `json:"message_event_id"`
+	EventType          string    `json:"event_type"`
+	PayloadJSON        string    `json:"payload_json"`
+	EventAt            time.Time `json:"event_at"`
+	ObservedAt         time.Time `json:"observed_at"`
+	EventSource        string    `json:"event_source,omitempty"`
+	Reason             string    `json:"reason"`
+	PredecessorEventID string    `json:"predecessor_event_id,omitempty"`
 }
 
 type MessageFilter struct {
@@ -230,18 +260,21 @@ func (s *Store) MergeAll(ctx context.Context, stats ImportStats, contacts []Cont
 	if err := ensureMergeSource(ctx, tx, stats, messages); err != nil {
 		return err
 	}
-	for _, chat := range chats {
-		if _, err := tx.ExecContext(ctx, `delete from folder_chats where chat_jid=?`, chat.JID); err != nil {
-			return err
-		}
-	}
-	if err := writeImport(ctx, tx, stats, contacts, chats, folders, folderChats, topics, messages); err != nil {
+	if err := writeImport(ctx, tx, stats, contacts, chats, folders, folderChats, topics, messages, false, true, true); err != nil {
 		return err
 	}
-	for _, chat := range chats {
-		if _, err := tx.ExecContext(ctx, `update chats set message_count=(select count(*) from messages where chat_jid=cast(chats.id as text)) where id=?`, parseInt64(chat.JID)); err != nil {
-			return err
-		}
+	scope := newTombstoneScope(chats, folders, folderChats, topics, nil, nil, messages)
+	if err := propagateTombstones(ctx, tx, scope); err != nil {
+		return err
+	}
+	if err := recordPropagatedMessageDeletions(ctx, tx, stats.FinishedAt, scope); err != nil {
+		return err
+	}
+	if err := pruneDeletedMessageFTS(ctx, tx, scope); err != nil {
+		return err
+	}
+	if err := recomputeChatAggregates(ctx, tx, affectedChatJIDs(chats, topics, messages)); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -258,17 +291,17 @@ func (s *Store) ValidateMergeSource(ctx context.Context, stats ImportStats, mess
 func ensureMergeSource(ctx context.Context, tx *sql.Tx, stats ImportStats, _ []Message) error {
 	sourcePath := strings.TrimSpace(stats.SourcePath)
 	if !stats.SourcePathCanonical || !filepath.IsAbs(sourcePath) {
-		return errors.New("refusing to merge without an absolute source path; use --replace")
+		return errors.New("refusing to merge without an absolute source path; use --restore")
 	}
 	sourceIdentity := strings.TrimSpace(stats.SourceIdentity)
 	if sourceIdentity == "" {
-		return errors.New("refusing to merge without a source identity; use --replace")
+		return errors.New("refusing to merge without a source identity; use --restore")
 	}
 	var storedIdentity string
 	err := tx.QueryRowContext(ctx, `select value from sync_state where key='source_identity'`).Scan(&storedIdentity)
 	if err == nil {
 		if storedIdentity != sourceIdentity {
-			return errors.New("refusing to merge a different Telegram source identity; use --replace")
+			return errors.New("refusing to merge a different Telegram source identity; use --restore")
 		}
 		return nil
 	}
@@ -286,7 +319,7 @@ func ensureMergeSource(ctx context.Context, tx *sql.Tx, stats ImportStats, _ []M
 			return err
 		}
 		if !empty {
-			return errors.New("refusing to merge into legacy archive with unknown source identity; use --adopt-source or --replace")
+			return errors.New("refusing to merge into legacy archive with unknown source identity; use --adopt-source or --restore")
 		}
 		return nil
 	}
@@ -298,7 +331,7 @@ func ensureMergeSource(ctx context.Context, tx *sql.Tx, stats ImportStats, _ []M
 		return err
 	}
 	if !empty && !stats.AdoptSource {
-		return errors.New("refusing to merge into archive with unknown source; use --adopt-source or --replace")
+		return errors.New("refusing to merge into archive with unknown source; use --adopt-source or --restore")
 	}
 	return nil
 }
@@ -323,47 +356,122 @@ func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, contacts []Co
 		return err
 	}
 	defer rollback(tx)
-	for _, q := range []string{"delete from messages_fts", "delete from messages", "delete from topics", "delete from folder_chats", "delete from folders", "delete from chats", "delete from contacts", "delete from groups", "delete from group_participants", "delete from sync_state"} {
+	for _, q := range []string{"delete from messages_fts", "delete from message_revisions", "delete from messages", "delete from topics", "delete from folder_chats", "delete from folders", "delete from chats", "delete from contacts", "delete from groups", "delete from group_participants", "delete from sync_state"} {
 		if _, err := tx.ExecContext(ctx, q); err != nil {
 			return err
 		}
 	}
-	if err := writeImport(ctx, tx, stats, contacts, chats, folders, folderChats, topics, messages); err != nil {
+	if err := writeImport(ctx, tx, stats, contacts, chats, folders, folderChats, topics, messages, false, true, true); err != nil {
+		return err
+	}
+	if err := propagateTombstones(ctx, tx, nil); err != nil {
+		return err
+	}
+	if err := recordPropagatedMessageDeletions(ctx, tx, stats.FinishedAt, nil); err != nil {
+		return err
+	}
+	if err := rebuildMessageFTS(ctx, tx); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func writeImport(ctx context.Context, tx *sql.Tx, stats ImportStats, contacts []Contact, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message) error {
-	if err := insertContacts(ctx, tx, contacts); err != nil {
+func writeImport(ctx context.Context, tx *sql.Tx, stats ImportStats, contacts []Contact, chats []Chat, folders []Folder, folderChats []FolderChat, topics []Topic, messages []Message, preserveTombstones, writeState, recordRevisions bool) error {
+	messages = append([]Message(nil), messages...)
+	if err := normalizeImportedMessageEventIDs(ctx, tx, messages); err != nil {
+		return err
+	}
+	source := firstNonEmptyString(stats.SourceIdentity, stats.SourcePath)
+	if err := insertContacts(ctx, tx, contacts, source, preserveTombstones); err != nil {
 		return err
 	}
 	for _, c := range chats {
-		if _, err := tx.ExecContext(ctx, `insert into chats(id,kind,name,username,last_message_at,unread_count,message_count,folder_id,forum) values(?,?,?,?,?,?,?,?,?) on conflict(id) do update set kind=excluded.kind, name=excluded.name, username=excluded.username, last_message_at=excluded.last_message_at, unread_count=excluded.unread_count, message_count=excluded.message_count, folder_id=excluded.folder_id, forum=excluded.forum`,
-			parseInt64(c.JID), c.Kind, c.Name, c.Username, unix(c.LastMessageAt), c.UnreadCount, c.MessageCount, c.FolderID, boolInt(c.Forum)); err != nil {
+		if err := normalizeTombstone(&c.Tombstone, source, "explicit-chat-delete"); err != nil {
+			return err
+		}
+		if !c.DeletedAt.IsZero() {
+			updated, err := updateExistingTombstone(ctx, tx, "chats", "id=?", []any{parseInt64(c.JID)}, c.Tombstone, preserveTombstones)
+			if err != nil {
+				return err
+			}
+			if updated {
+				continue
+			}
+		}
+		deletedAt, deletionSource, deletionReason := tombstoneUpdate("chats", preserveTombstones)
+		query := `insert into chats(id,kind,name,username,last_message_at,unread_count,message_count,folder_id,forum,deleted_at,deletion_source,deletion_reason) values(?,?,?,?,?,?,?,?,?,?,?,?) on conflict(id) do update set kind=excluded.kind, name=excluded.name, username=excluded.username, last_message_at=excluded.last_message_at, unread_count=excluded.unread_count, message_count=excluded.message_count, folder_id=excluded.folder_id, forum=excluded.forum, deleted_at=` + deletedAt + `, deletion_source=` + deletionSource + `, deletion_reason=` + deletionReason + conflictUpdateWhere("chats", preserveTombstones)
+		if _, err := tx.ExecContext(ctx, query,
+			parseInt64(c.JID), c.Kind, c.Name, c.Username, unix(c.LastMessageAt), c.UnreadCount, c.MessageCount, c.FolderID, boolInt(c.Forum), nullableUnix(c.DeletedAt), nullableString(c.DeletionSource), nullableString(c.DeletionReason)); err != nil {
 			return err
 		}
 	}
 	for _, f := range folders {
-		if _, err := tx.ExecContext(ctx, `insert into folders(id,title,emoticon,color,flags_json) values(?,?,?,?,?) on conflict(id) do update set title=excluded.title, emoticon=excluded.emoticon, color=excluded.color, flags_json=excluded.flags_json`,
-			f.ID, f.Title, f.Emoticon, f.Color, f.FlagsJSON); err != nil {
+		if err := normalizeTombstone(&f.Tombstone, source, "explicit-folder-delete"); err != nil {
+			return err
+		}
+		if !f.DeletedAt.IsZero() {
+			updated, err := updateExistingTombstone(ctx, tx, "folders", "id=?", []any{f.ID}, f.Tombstone, preserveTombstones)
+			if err != nil {
+				return err
+			}
+			if updated {
+				continue
+			}
+		}
+		deletedAt, deletionSource, deletionReason := tombstoneUpdate("folders", preserveTombstones)
+		query := `insert into folders(id,title,emoticon,color,flags_json,deleted_at,deletion_source,deletion_reason) values(?,?,?,?,?,?,?,?) on conflict(id) do update set title=excluded.title, emoticon=excluded.emoticon, color=excluded.color, flags_json=excluded.flags_json, deleted_at=` + deletedAt + `, deletion_source=` + deletionSource + `, deletion_reason=` + deletionReason + conflictUpdateWhere("folders", preserveTombstones)
+		if _, err := tx.ExecContext(ctx, query,
+			f.ID, f.Title, f.Emoticon, f.Color, f.FlagsJSON, nullableUnix(f.DeletedAt), nullableString(f.DeletionSource), nullableString(f.DeletionReason)); err != nil {
 			return err
 		}
 	}
 	for _, fc := range folderChats {
-		if _, err := tx.ExecContext(ctx, `insert into folder_chats(folder_id,chat_jid,position) values(?,?,?) on conflict(folder_id,chat_jid) do update set position=excluded.position`,
-			fc.FolderID, fc.ChatJID, fc.Position); err != nil {
+		if err := normalizeTombstone(&fc.Tombstone, source, "explicit-folder-membership-delete"); err != nil {
+			return err
+		}
+		if !fc.DeletedAt.IsZero() {
+			updated, err := updateExistingTombstone(ctx, tx, "folder_chats", "folder_id=? and chat_jid=?", []any{fc.FolderID, fc.ChatJID}, fc.Tombstone, preserveTombstones)
+			if err != nil {
+				return err
+			}
+			if updated {
+				continue
+			}
+		}
+		deletedAt, deletionSource, deletionReason := tombstoneUpdate("folder_chats", preserveTombstones)
+		query := `insert into folder_chats(folder_id,chat_jid,position,deleted_at,deletion_source,deletion_reason) values(?,?,?,?,?,?) on conflict(folder_id,chat_jid) do update set position=excluded.position, deleted_at=` + deletedAt + `, deletion_source=` + deletionSource + `, deletion_reason=` + deletionReason + conflictUpdateWhere("folder_chats", preserveTombstones)
+		if _, err := tx.ExecContext(ctx, query,
+			fc.FolderID, fc.ChatJID, fc.Position, nullableUnix(fc.DeletedAt), nullableString(fc.DeletionSource), nullableString(fc.DeletionReason)); err != nil {
 			return err
 		}
 	}
 	for _, t := range topics {
-		if _, err := tx.ExecContext(ctx, `insert into topics(chat_jid,topic_id,title,top_message_id,icon_color,icon_emoji_id,unread_count,unread_mentions_count,unread_reactions_count,pinned,closed,hidden,last_message_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?) on conflict(chat_jid,topic_id) do update set title=excluded.title, top_message_id=excluded.top_message_id, icon_color=excluded.icon_color, icon_emoji_id=excluded.icon_emoji_id, unread_count=excluded.unread_count, unread_mentions_count=excluded.unread_mentions_count, unread_reactions_count=excluded.unread_reactions_count, pinned=excluded.pinned, closed=excluded.closed, hidden=excluded.hidden, last_message_at=excluded.last_message_at`,
-			t.ChatJID, t.TopicID, t.Title, t.TopMessageID, t.IconColor, t.IconEmojiID, t.UnreadCount, t.UnreadMentionsCount, t.UnreadReactionsCount, boolInt(t.Pinned), boolInt(t.Closed), boolInt(t.Hidden), unix(t.LastMessageAt)); err != nil {
+		if err := normalizeTombstone(&t.Tombstone, source, "explicit-topic-delete"); err != nil {
+			return err
+		}
+		if !t.DeletedAt.IsZero() {
+			updated, err := updateExistingTombstone(ctx, tx, "topics", "chat_jid=? and topic_id=?", []any{t.ChatJID, t.TopicID}, t.Tombstone, preserveTombstones)
+			if err != nil {
+				return err
+			}
+			if updated {
+				continue
+			}
+		}
+		deletedAt, deletionSource, deletionReason := tombstoneUpdate("topics", preserveTombstones)
+		query := `insert into topics(chat_jid,topic_id,title,top_message_id,icon_color,icon_emoji_id,unread_count,unread_mentions_count,unread_reactions_count,pinned,closed,hidden,last_message_at,deleted_at,deletion_source,deletion_reason) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) on conflict(chat_jid,topic_id) do update set title=excluded.title, top_message_id=excluded.top_message_id, icon_color=excluded.icon_color, icon_emoji_id=excluded.icon_emoji_id, unread_count=excluded.unread_count, unread_mentions_count=excluded.unread_mentions_count, unread_reactions_count=excluded.unread_reactions_count, pinned=excluded.pinned, closed=excluded.closed, hidden=excluded.hidden, last_message_at=excluded.last_message_at, deleted_at=` + deletedAt + `, deletion_source=` + deletionSource + `, deletion_reason=` + deletionReason + conflictUpdateWhere("topics", preserveTombstones)
+		if _, err := tx.ExecContext(ctx, query,
+			t.ChatJID, t.TopicID, t.Title, t.TopMessageID, t.IconColor, t.IconEmojiID, t.UnreadCount, t.UnreadMentionsCount, t.UnreadReactionsCount, boolInt(t.Pinned), boolInt(t.Closed), boolInt(t.Hidden), unix(t.LastMessageAt), nullableUnix(t.DeletedAt), nullableString(t.DeletionSource), nullableString(t.DeletionReason)); err != nil {
 			return err
 		}
 	}
-	if err := insertMessages(ctx, tx, messages); err != nil {
+	// Snapshot merge filters message conflicts through the causal revision graph
+	// before this point, so selected message rows are authoritative here too.
+	if err := insertMessages(ctx, tx, messages, stats.FinishedAt, source, false, recordRevisions); err != nil {
 		return err
+	}
+	if !writeState {
+		return nil
 	}
 	now := stats.FinishedAt
 	if now.IsZero() {
@@ -392,29 +500,75 @@ func writeImport(ctx context.Context, tx *sql.Tx, stats ImportStats, contacts []
 	return nil
 }
 
-func insertContacts(ctx context.Context, tx *sql.Tx, contacts []Contact) error {
+func insertContacts(ctx context.Context, tx *sql.Tx, contacts []Contact, source string, preserveTombstones bool) error {
 	for _, c := range contacts {
 		if strings.TrimSpace(c.JID) == "" {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `insert into contacts(jid,peer_type,phone,full_name,first_name,last_name,business_name,username,lid,about_text,avatar_path,updated_at) values(?,?,?,?,?,?,?,?,?,?,?,?) on conflict(jid) do update set peer_type=excluded.peer_type, phone=excluded.phone, full_name=excluded.full_name, first_name=excluded.first_name, last_name=excluded.last_name, business_name=excluded.business_name, username=excluded.username, lid=excluded.lid, about_text=excluded.about_text, avatar_path=excluded.avatar_path, updated_at=excluded.updated_at`,
-			c.JID, c.PeerType, c.Phone, c.FullName, c.FirstName, c.LastName, c.BusinessName, c.Username, c.LID, c.AboutText, c.AvatarPath, unix(c.UpdatedAt)); err != nil {
+		if err := normalizeTombstone(&c.Tombstone, source, "explicit-contact-delete"); err != nil {
+			return err
+		}
+		if !c.DeletedAt.IsZero() {
+			updated, err := updateExistingTombstone(ctx, tx, "contacts", "jid=?", []any{c.JID}, c.Tombstone, preserveTombstones)
+			if err != nil {
+				return err
+			}
+			if updated {
+				continue
+			}
+		}
+		deletedAt, deletionSource, deletionReason := tombstoneUpdate("contacts", preserveTombstones)
+		query := `insert into contacts(jid,peer_type,phone,full_name,first_name,last_name,business_name,username,lid,about_text,avatar_path,updated_at,deleted_at,deletion_source,deletion_reason) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) on conflict(jid) do update set peer_type=excluded.peer_type, phone=excluded.phone, full_name=excluded.full_name, first_name=excluded.first_name, last_name=excluded.last_name, business_name=excluded.business_name, username=excluded.username, lid=excluded.lid, about_text=excluded.about_text, avatar_path=excluded.avatar_path, updated_at=excluded.updated_at, deleted_at=` + deletedAt + `, deletion_source=` + deletionSource + `, deletion_reason=` + deletionReason + conflictUpdateWhere("contacts", preserveTombstones)
+		if _, err := tx.ExecContext(ctx, query,
+			c.JID, c.PeerType, c.Phone, c.FullName, c.FirstName, c.LastName, c.BusinessName, c.Username, c.LID, c.AboutText, c.AvatarPath, unix(c.UpdatedAt), nullableUnix(c.DeletedAt), nullableString(c.DeletionSource), nullableString(c.DeletionReason)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func insertMessages(ctx context.Context, tx *sql.Tx, messages []Message) error {
+func insertMessages(ctx context.Context, tx *sql.Tx, messages []Message, observedAt time.Time, source string, preserveTombstones, recordRevisions bool) error {
 	for _, m := range messages {
-		if _, err := tx.ExecContext(ctx, `insert into messages(source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,metadata_type,metadata_title,metadata_url,metadata_json,starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,edit_ts,forward_json,reactions_json,views,forwards,replies_count,pinned) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) on conflict(source_pk) do update set chat_jid=excluded.chat_jid, chat_name=excluded.chat_name, msg_id=excluded.msg_id, sender_jid=excluded.sender_jid, sender_name=excluded.sender_name, ts=excluded.ts, from_me=excluded.from_me, text=excluded.text, raw_type=excluded.raw_type, message_type=excluded.message_type, media_type=case when excluded.media_type='' then messages.media_type else excluded.media_type end, media_title=case when excluded.media_title='' then messages.media_title else excluded.media_title end, media_path=case when excluded.media_path='' then messages.media_path else excluded.media_path end, media_url=case when excluded.media_url='' then messages.media_url else excluded.media_url end, media_size=case when excluded.media_path='' then messages.media_size else excluded.media_size end, metadata_type=excluded.metadata_type, metadata_title=excluded.metadata_title, metadata_url=excluded.metadata_url, metadata_json=excluded.metadata_json, starred=excluded.starred, topic_id=excluded.topic_id, reply_to_msg_id=excluded.reply_to_msg_id, reply_to_chat_jid=excluded.reply_to_chat_jid, thread_id=excluded.thread_id, edit_ts=excluded.edit_ts, forward_json=excluded.forward_json, reactions_json=excluded.reactions_json, views=excluded.views, forwards=excluded.forwards, replies_count=excluded.replies_count, pinned=excluded.pinned`,
-			m.SourcePK, m.ChatJID, m.ChatName, m.MessageID, m.SenderJID, m.SenderName, unix(m.Timestamp), boolInt(m.FromMe), m.Text, m.RawType, m.MessageType, m.MediaType, m.MediaTitle, m.MediaPath, m.MediaURL, m.MediaSize, m.MetadataType, m.MetadataTitle, m.MetadataURL, m.MetadataJSON, boolInt(m.Starred), m.TopicID, m.ReplyToID, m.ReplyToChat, m.ThreadID, unix(m.EditTime), m.ForwardJSON, m.ReactionsJSON, m.Views, m.Forwards, m.RepliesCount, boolInt(m.Pinned)); err != nil {
+		if err := normalizeMessage(&m, source); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `delete from messages_fts where rowid=(select rowid from messages where source_pk=?)`, m.SourcePK); err != nil {
+		current, found, err := storedMessage(ctx, tx, m.EventID)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `insert into messages_fts(rowid,text,chat,sender,media) select rowid,trim(coalesce(text,'')||' '||coalesce(media_title,'')||' '||coalesce(metadata_title,'')||' '||coalesce(metadata_url,'')),coalesce(chat_name,''),coalesce(sender_name,''),coalesce(media_type,'') from messages where source_pk=?`, m.SourcePK); err != nil {
+		if found {
+			if !m.DeletedAt.IsZero() {
+				if !preserveTombstones || current.DeletedAt.IsZero() {
+					current.Tombstone = m.Tombstone
+				}
+				m = current
+			} else if preserveTombstones && !current.DeletedAt.IsZero() {
+				m = current
+			} else {
+				m = mergeStoredMedia(current, m)
+			}
+		}
+		if recordRevisions {
+			revision, err := pendingMessageRevision(ctx, tx, m, observedAt, source)
+			if err != nil {
+				return err
+			}
+			if revision != nil {
+				if err := insertMessageRevision(ctx, tx, *revision); err != nil {
+					return err
+				}
+			}
+		}
+		deletedAt, deletionSource, deletionReason := tombstoneUpdate("messages", preserveTombstones)
+		query := `insert into messages(event_id,source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,metadata_type,metadata_title,metadata_url,metadata_json,starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,edit_ts,forward_json,reactions_json,views,forwards,replies_count,pinned,deleted_at,deletion_source,deletion_reason) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) on conflict(event_id) do update set source_pk=excluded.source_pk, chat_jid=excluded.chat_jid, chat_name=excluded.chat_name, msg_id=excluded.msg_id, sender_jid=excluded.sender_jid, sender_name=excluded.sender_name, ts=excluded.ts, from_me=excluded.from_me, text=excluded.text, raw_type=excluded.raw_type, message_type=excluded.message_type, media_type=case when excluded.media_type='' then messages.media_type else excluded.media_type end, media_title=case when excluded.media_title='' then messages.media_title else excluded.media_title end, media_path=case when excluded.media_path='' then messages.media_path else excluded.media_path end, media_url=case when excluded.media_url='' then messages.media_url else excluded.media_url end, media_size=case when excluded.media_path='' then messages.media_size else excluded.media_size end, metadata_type=excluded.metadata_type, metadata_title=excluded.metadata_title, metadata_url=excluded.metadata_url, metadata_json=excluded.metadata_json, starred=excluded.starred, topic_id=excluded.topic_id, reply_to_msg_id=excluded.reply_to_msg_id, reply_to_chat_jid=excluded.reply_to_chat_jid, thread_id=excluded.thread_id, edit_ts=excluded.edit_ts, forward_json=excluded.forward_json, reactions_json=excluded.reactions_json, views=excluded.views, forwards=excluded.forwards, replies_count=excluded.replies_count, pinned=excluded.pinned, deleted_at=` + deletedAt + `, deletion_source=` + deletionSource + `, deletion_reason=` + deletionReason + conflictUpdateWhere("messages", preserveTombstones)
+		if _, err := tx.ExecContext(ctx, query,
+			m.EventID, m.SourcePK, m.ChatJID, m.ChatName, m.MessageID, m.SenderJID, m.SenderName, unix(m.Timestamp), boolInt(m.FromMe), m.Text, m.RawType, m.MessageType, m.MediaType, m.MediaTitle, m.MediaPath, m.MediaURL, m.MediaSize, m.MetadataType, m.MetadataTitle, m.MetadataURL, m.MetadataJSON, boolInt(m.Starred), m.TopicID, m.ReplyToID, m.ReplyToChat, m.ThreadID, unix(m.EditTime), m.ForwardJSON, m.ReactionsJSON, m.Views, m.Forwards, m.RepliesCount, boolInt(m.Pinned), nullableUnix(m.DeletedAt), nullableString(m.DeletionSource), nullableString(m.DeletionReason)); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `delete from messages_fts where rowid=(select rowid from messages where event_id=?)`, m.EventID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `insert into messages_fts(rowid,text,chat,sender,media) select rowid,trim(coalesce(text,'')||' '||coalesce(media_title,'')||' '||coalesce(metadata_title,'')||' '||coalesce(metadata_url,'')),coalesce(chat_name,''),coalesce(sender_name,''),coalesce(media_type,'') from messages where event_id=? and deleted_at is null`, m.EventID); err != nil {
 			return err
 		}
 	}
@@ -427,20 +581,20 @@ func (s *Store) Status(ctx context.Context) (Status, error) {
 		dst *int
 		q   string
 	}{
-		{&out.Chats, "select count(*) from chats"},
-		{&out.UnreadChats, "select count(*) from chats where unread_count > 0"},
-		{&out.UnreadMessages, "select coalesce(sum(unread_count), 0) from chats"},
-		{&out.Messages, "select count(*) from messages"},
-		{&out.MediaMessages, "select count(*) from messages where media_type <> ''"},
-		{&out.Folders, "select count(*) from folders"},
-		{&out.Topics, "select count(*) from topics"},
+		{&out.Chats, "select count(*) from chats where deleted_at is null"},
+		{&out.UnreadChats, "select count(*) from chats where deleted_at is null and unread_count > 0"},
+		{&out.UnreadMessages, "select coalesce(sum(unread_count), 0) from chats where deleted_at is null"},
+		{&out.Messages, "select count(*) from messages where deleted_at is null"},
+		{&out.MediaMessages, "select count(*) from messages where deleted_at is null and media_type <> ''"},
+		{&out.Folders, "select count(*) from folders where deleted_at is null"},
+		{&out.Topics, "select count(*) from topics where deleted_at is null"},
 	} {
 		if err := s.db.QueryRowContext(ctx, c.q).Scan(c.dst); err != nil {
 			return out, err
 		}
 	}
 	var oldest, newest sql.NullInt64
-	if err := s.db.QueryRowContext(ctx, `select min(ts), max(ts) from messages`).Scan(&oldest, &newest); err != nil {
+	if err := s.db.QueryRowContext(ctx, `select min(ts), max(ts) from messages where deleted_at is null`).Scan(&oldest, &newest); err != nil {
 		return out, err
 	}
 	if oldest.Valid {
@@ -462,11 +616,11 @@ func (s *Store) ListChats(ctx context.Context, limit int, unread bool) ([]Chat, 
 	if limit <= 0 {
 		limit = 50
 	}
-	where := ""
+	where := "where deleted_at is null"
 	if unread {
-		where = "where unread_count > 0"
+		where += " and unread_count > 0"
 	}
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`select cast(id as text),kind,name,username,last_message_at,unread_count,message_count,coalesce(folder_id,''),forum from chats %s order by last_message_at desc limit ?`, where), limit)
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`select cast(id as text),kind,coalesce(name,''),coalesce(username,''),coalesce(last_message_at,0),unread_count,message_count,coalesce(folder_id,''),forum from chats %s order by last_message_at desc limit ?`, where), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -487,7 +641,7 @@ func (s *Store) ListChats(ctx context.Context, limit int, unread bool) ([]Chat, 
 }
 
 func (s *Store) ListFolders(ctx context.Context) ([]Folder, error) {
-	rows, err := s.db.QueryContext(ctx, `select id,title,emoticon,color,flags_json from folders order by cast(id as integer), title`)
+	rows, err := s.db.QueryContext(ctx, `select id,coalesce(title,''),coalesce(emoticon,''),color,coalesce(flags_json,'') from folders where deleted_at is null order by cast(id as integer), title`)
 	if err != nil {
 		return nil, err
 	}
@@ -507,9 +661,9 @@ func (s *Store) ChatsInFolder(ctx context.Context, folderID string, limit int) (
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `select cast(c.id as text),c.kind,c.name,c.username,c.last_message_at,c.unread_count,c.message_count,coalesce(c.folder_id,''),c.forum
+	rows, err := s.db.QueryContext(ctx, `select cast(c.id as text),c.kind,coalesce(c.name,''),coalesce(c.username,''),coalesce(c.last_message_at,0),c.unread_count,c.message_count,coalesce(c.folder_id,''),c.forum
 from folder_chats fc join chats c on cast(c.id as text)=fc.chat_jid
-where fc.folder_id=?
+where fc.folder_id=? and fc.deleted_at is null and c.deleted_at is null
 order by fc.position asc, c.last_message_at desc
 limit ?`, folderID, limit)
 	if err != nil {
@@ -538,8 +692,8 @@ func (s *Store) ListTopics(ctx context.Context, chatJID string, limit int) ([]To
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `select chat_jid,topic_id,title,top_message_id,icon_color,icon_emoji_id,unread_count,unread_mentions_count,unread_reactions_count,pinned,closed,hidden,last_message_at
-from topics where chat_jid=?
+	rows, err := s.db.QueryContext(ctx, `select chat_jid,topic_id,coalesce(title,''),coalesce(top_message_id,''),icon_color,coalesce(icon_emoji_id,''),unread_count,unread_mentions_count,unread_reactions_count,pinned,closed,hidden,coalesce(last_message_at,0)
+from topics where chat_jid=? and deleted_at is null
 order by pinned desc, last_message_at desc, cast(topic_id as integer) desc
 limit ?`, chatJID, limit)
 	if err != nil {
@@ -578,7 +732,7 @@ func (s *Store) messages(ctx context.Context, filter MessageFilter, search bool)
 	if filter.Limit <= 0 {
 		filter.Limit = 50
 	}
-	query := `select source_pk,chat_jid,coalesce(chat_name,''),msg_id,coalesce(sender_jid,''),coalesce(sender_name,''),ts,coalesce(edit_ts,0),from_me,coalesce(text,''),raw_type,coalesce(message_type,''),coalesce(media_type,''),coalesce(media_title,''),coalesce(media_path,''),coalesce(media_url,''),coalesce(media_size,0),coalesce(metadata_type,''),coalesce(metadata_title,''),coalesce(metadata_url,''),coalesce(metadata_json,''),starred,coalesce(topic_id,''),coalesce(reply_to_msg_id,''),coalesce(reply_to_chat_jid,''),coalesce(thread_id,''),coalesce(forward_json,''),coalesce(reactions_json,''),coalesce(views,0),coalesce(forwards,0),coalesce(replies_count,0),coalesce(pinned,0),'' from messages where 1=1`
+	query := `select event_id,source_pk,chat_jid,coalesce(chat_name,''),msg_id,coalesce(sender_jid,''),coalesce(sender_name,''),ts,coalesce(edit_ts,0),from_me,coalesce(text,''),raw_type,coalesce(message_type,''),coalesce(media_type,''),coalesce(media_title,''),coalesce(media_path,''),coalesce(media_url,''),coalesce(media_size,0),coalesce(metadata_type,''),coalesce(metadata_title,''),coalesce(metadata_url,''),coalesce(metadata_json,''),starred,coalesce(topic_id,''),coalesce(reply_to_msg_id,''),coalesce(reply_to_chat_jid,''),coalesce(thread_id,''),coalesce(forward_json,''),coalesce(reactions_json,''),coalesce(views,0),coalesce(forwards,0),coalesce(replies_count,0),coalesce(pinned,0),'' from messages where deleted_at is null`
 	args := []any{}
 	prefix := ""
 	if search {
@@ -586,7 +740,7 @@ func (s *Store) messages(ctx context.Context, filter MessageFilter, search bool)
 		if err != nil {
 			return nil, err
 		}
-		query = `select m.source_pk,m.chat_jid,coalesce(m.chat_name,''),m.msg_id,coalesce(m.sender_jid,''),coalesce(m.sender_name,''),m.ts,coalesce(m.edit_ts,0),m.from_me,coalesce(m.text,''),m.raw_type,coalesce(m.message_type,''),coalesce(m.media_type,''),coalesce(m.media_title,''),coalesce(m.media_path,''),coalesce(m.media_url,''),coalesce(m.media_size,0),coalesce(m.metadata_type,''),coalesce(m.metadata_title,''),coalesce(m.metadata_url,''),coalesce(m.metadata_json,''),m.starred,coalesce(m.topic_id,''),coalesce(m.reply_to_msg_id,''),coalesce(m.reply_to_chat_jid,''),coalesce(m.thread_id,''),coalesce(m.forward_json,''),coalesce(m.reactions_json,''),coalesce(m.views,0),coalesce(m.forwards,0),coalesce(m.replies_count,0),coalesce(m.pinned,0),snippet(messages_fts,0,'[',']','...',12) from messages_fts f join messages m on m.rowid=f.rowid where messages_fts match ?`
+		query = `select m.event_id,m.source_pk,m.chat_jid,coalesce(m.chat_name,''),m.msg_id,coalesce(m.sender_jid,''),coalesce(m.sender_name,''),m.ts,coalesce(m.edit_ts,0),m.from_me,coalesce(m.text,''),m.raw_type,coalesce(m.message_type,''),coalesce(m.media_type,''),coalesce(m.media_title,''),coalesce(m.media_path,''),coalesce(m.media_url,''),coalesce(m.media_size,0),coalesce(m.metadata_type,''),coalesce(m.metadata_title,''),coalesce(m.metadata_url,''),coalesce(m.metadata_json,''),m.starred,coalesce(m.topic_id,''),coalesce(m.reply_to_msg_id,''),coalesce(m.reply_to_chat_jid,''),coalesce(m.thread_id,''),coalesce(m.forward_json,''),coalesce(m.reactions_json,''),coalesce(m.views,0),coalesce(m.forwards,0),coalesce(m.replies_count,0),coalesce(m.pinned,0),snippet(messages_fts,0,'[',']','...',12) from messages_fts f join messages m on m.rowid=f.rowid where messages_fts match ? and m.deleted_at is null`
 		args = append(args, ftsQuery)
 		prefix = "m."
 	}
@@ -638,7 +792,7 @@ func (s *Store) messages(ctx context.Context, filter MessageFilter, search bool)
 		var m Message
 		var ts, editTS int64
 		var fromMe, starred, pinned int
-		if err := rows.Scan(&m.SourcePK, &m.ChatJID, &m.ChatName, &m.MessageID, &m.SenderJID, &m.SenderName, &ts, &editTS, &fromMe, &m.Text, &m.RawType, &m.MessageType, &m.MediaType, &m.MediaTitle, &m.MediaPath, &m.MediaURL, &m.MediaSize, &m.MetadataType, &m.MetadataTitle, &m.MetadataURL, &m.MetadataJSON, &starred, &m.TopicID, &m.ReplyToID, &m.ReplyToChat, &m.ThreadID, &m.ForwardJSON, &m.ReactionsJSON, &m.Views, &m.Forwards, &m.RepliesCount, &pinned, &m.Snippet); err != nil {
+		if err := rows.Scan(&m.EventID, &m.SourcePK, &m.ChatJID, &m.ChatName, &m.MessageID, &m.SenderJID, &m.SenderName, &ts, &editTS, &fromMe, &m.Text, &m.RawType, &m.MessageType, &m.MediaType, &m.MediaTitle, &m.MediaPath, &m.MediaURL, &m.MediaSize, &m.MetadataType, &m.MetadataTitle, &m.MetadataURL, &m.MetadataJSON, &starred, &m.TopicID, &m.ReplyToID, &m.ReplyToChat, &m.ThreadID, &m.ForwardJSON, &m.ReactionsJSON, &m.Views, &m.Forwards, &m.RepliesCount, &pinned, &m.Snippet); err != nil {
 			return nil, err
 		}
 		m.Timestamp = fromUnix(ts)
@@ -652,12 +806,41 @@ func (s *Store) messages(ctx context.Context, filter MessageFilter, search bool)
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
+	var currentVersion int
+	if err := db.QueryRowContext(ctx, `pragma user_version`).Scan(&currentVersion); err != nil {
+		return err
+	}
+	if currentVersion > schemaVersion {
+		return fmt.Errorf("database schema version %d is newer than this telecrawl build supports (%d)", currentVersion, schemaVersion)
+	}
+	if currentVersion == schemaVersion {
+		return nil
+	}
 	adds := map[string]map[string]string{
 		"chats": {
-			"folder_id": "text",
-			"forum":     "integer not null default 0",
+			"folder_id":       "text",
+			"forum":           "integer not null default 0",
+			"deleted_at":      "integer",
+			"deletion_source": "text",
+			"deletion_reason": "text",
+		},
+		"folders": {
+			"deleted_at":      "integer",
+			"deletion_source": "text",
+			"deletion_reason": "text",
+		},
+		"folder_chats": {
+			"deleted_at":      "integer",
+			"deletion_source": "text",
+			"deletion_reason": "text",
+		},
+		"topics": {
+			"deleted_at":      "integer",
+			"deletion_source": "text",
+			"deletion_reason": "text",
 		},
 		"messages": {
+			"event_id":          "text",
 			"topic_id":          "text",
 			"reply_to_msg_id":   "text",
 			"reply_to_chat_jid": "text",
@@ -673,10 +856,29 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			"metadata_title":    "text",
 			"metadata_url":      "text",
 			"metadata_json":     "text",
+			"deleted_at":        "integer",
+			"deletion_source":   "text",
+			"deletion_reason":   "text",
+		},
+		"message_revisions": {
+			"predecessor_event_id": "text",
 		},
 		"contacts": {
-			"peer_type":   "text",
-			"avatar_path": "text",
+			"peer_type":       "text",
+			"avatar_path":     "text",
+			"deleted_at":      "integer",
+			"deletion_source": "text",
+			"deletion_reason": "text",
+		},
+		"groups": {
+			"deleted_at":      "integer",
+			"deletion_source": "text",
+			"deletion_reason": "text",
+		},
+		"group_participants": {
+			"deleted_at":      "integer",
+			"deletion_source": "text",
+			"deletion_reason": "text",
 		},
 	}
 	for table, defs := range adds {
@@ -693,7 +895,219 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			}
 		}
 	}
-	return nil
+	if _, err := db.ExecContext(ctx, `create index if not exists idx_messages_chat_msg on messages(chat_jid,msg_id)`); err != nil {
+		return err
+	}
+	if err := backfillMessageEventIDs(ctx, db); err != nil {
+		return err
+	}
+	if err := removeMessageSourcePKUniqueness(ctx, db); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `create unique index if not exists idx_messages_event_id on messages(event_id)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `create index if not exists idx_message_revisions_message on message_revisions(message_event_id,event_at,event_id)`); err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	if err := seedMissingMessageBaselines(ctx, tx, time.Now().UTC(), "schema-v5-migration"); err != nil {
+		return err
+	}
+	if err := propagateTombstones(ctx, tx, nil); err != nil {
+		return err
+	}
+	if err := recordPropagatedMessageDeletions(ctx, tx, time.Now().UTC(), nil); err != nil {
+		return err
+	}
+	if err := rebuildMessageFTS(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func removeMessageSourcePKUniqueness(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `pragma index_list(messages)`)
+	if err != nil {
+		return err
+	}
+	type indexInfo struct {
+		name   string
+		unique bool
+	}
+	var indexes []indexInfo
+	for rows.Next() {
+		var seq, unique, partial int
+		var name, origin string
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		indexes = append(indexes, indexInfo{name: name, unique: unique != 0})
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	uniqueSourcePK := false
+	for _, index := range indexes {
+		if !index.unique {
+			continue
+		}
+		columns, err := db.QueryContext(ctx, `pragma index_info(`+strconv.Quote(index.name)+`)`)
+		if err != nil {
+			return err
+		}
+		var names []string
+		for columns.Next() {
+			var seq, cid int
+			var name string
+			if err := columns.Scan(&seq, &cid, &name); err != nil {
+				_ = columns.Close()
+				return err
+			}
+			names = append(names, name)
+		}
+		if err := columns.Close(); err != nil {
+			return err
+		}
+		if err := columns.Err(); err != nil {
+			return err
+		}
+		if len(names) == 1 && names[0] == "source_pk" {
+			uniqueSourcePK = true
+			break
+		}
+	}
+	if !uniqueSourcePK {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	if _, err := tx.ExecContext(ctx, `create table messages_v5 (
+		rowid integer primary key autoincrement,
+		event_id text not null unique,
+		source_pk integer not null,
+		chat_jid text not null,
+		chat_name text,
+		msg_id text not null,
+		sender_jid text,
+		sender_name text,
+		ts integer not null,
+		from_me integer not null,
+		text text,
+		raw_type integer not null default 0,
+		message_type text,
+		media_type text,
+		media_title text,
+		media_path text,
+		media_url text,
+		media_size integer,
+		metadata_type text,
+		metadata_title text,
+		metadata_url text,
+		metadata_json text,
+		starred integer not null default 0,
+		topic_id text,
+		reply_to_msg_id text,
+		reply_to_chat_jid text,
+		thread_id text,
+		edit_ts integer,
+		forward_json text,
+		reactions_json text,
+		views integer not null default 0,
+		forwards integer not null default 0,
+		replies_count integer not null default 0,
+		pinned integer not null default 0,
+		deleted_at integer,
+		deletion_source text,
+		deletion_reason text
+	)`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `insert into messages_v5(rowid,event_id,source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,metadata_type,metadata_title,metadata_url,metadata_json,starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,edit_ts,forward_json,reactions_json,views,forwards,replies_count,pinned,deleted_at,deletion_source,deletion_reason)
+		select rowid,event_id,source_pk,chat_jid,chat_name,msg_id,sender_jid,sender_name,ts,from_me,text,raw_type,message_type,media_type,media_title,media_path,media_url,media_size,metadata_type,metadata_title,metadata_url,metadata_json,starred,topic_id,reply_to_msg_id,reply_to_chat_jid,thread_id,edit_ts,forward_json,reactions_json,views,forwards,replies_count,pinned,deleted_at,deletion_source,deletion_reason from messages`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `drop table messages`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `alter table messages_v5 rename to messages`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func backfillMessageEventIDs(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	if err := backfillMessageEventIDsTx(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func backfillMessageEventIDsTx(ctx context.Context, tx *sql.Tx) error {
+	const batchSize = 1000
+	lastSourcePK := int64(-1 << 63)
+	lastRowID := int64(0)
+	for {
+		rows, err := tx.QueryContext(ctx, `select rowid,source_pk,chat_jid,msg_id from messages
+			where source_pk>? or (source_pk=? and rowid>?)
+			order by source_pk,rowid limit ?`, lastSourcePK, lastSourcePK, lastRowID, batchSize)
+		if err != nil {
+			return err
+		}
+		type legacyMessage struct {
+			rowID, sourcePK int64
+			chatJID, msgID  string
+		}
+		batch := make([]legacyMessage, 0, batchSize)
+		for rows.Next() {
+			var message legacyMessage
+			if err := rows.Scan(&message.rowID, &message.sourcePK, &message.chatJID, &message.msgID); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			batch = append(batch, message)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		for _, message := range batch {
+			var familySize int
+			if err := tx.QueryRowContext(ctx, `select count(*) from messages where chat_jid=? and msg_id=?`, message.chatJID, message.msgID).Scan(&familySize); err != nil {
+				return err
+			}
+			eventID := stableMessageEventID(message.chatJID, message.msgID)
+			if familySize > 1 {
+				eventID = stableLegacyMessageEventID(message.chatJID, message.msgID, message.sourcePK, 0)
+			}
+			if _, err := tx.ExecContext(ctx, `update messages set event_id=? where rowid=? and (event_id is null or trim(event_id)='')`, eventID, message.rowID); err != nil {
+				return err
+			}
+			lastSourcePK = message.sourcePK
+			lastRowID = message.rowID
+		}
+	}
 }
 
 func columns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
@@ -737,6 +1151,14 @@ func fromUnix(v int64) time.Time {
 	}
 	return time.Unix(v, 0).UTC()
 }
+
+func fromNullUnix(v sql.NullInt64) time.Time {
+	if !v.Valid {
+		return time.Time{}
+	}
+	return fromUnix(v.Int64)
+}
+
 func rollback(tx *sql.Tx) { _ = tx.Rollback() }
 
 func parseInt64(s string) int64 {

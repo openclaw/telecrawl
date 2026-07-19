@@ -30,6 +30,7 @@ type Options struct {
 	Ref        string
 	Tag        string
 	Limit      int
+	Restore    bool
 }
 
 func DefaultConfig() Config {

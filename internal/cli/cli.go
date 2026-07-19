@@ -161,7 +161,8 @@ func (r *runtime) runImport(args []string) error {
 	messagesLimit := fs.Int("messages-limit", 500, "")
 	chat := fs.String("chat", "", "")
 	fetchMedia := fs.Bool("fetch-media", false, "")
-	replace := fs.Bool("replace", false, "")
+	restore := fs.Bool("restore", false, "")
+	replace := fs.Bool("replace", false, "") // Compatibility alias shipped in v0.3.4.
 	adoptSource := fs.Bool("adopt-source", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
@@ -169,11 +170,15 @@ func (r *runtime) runImport(args []string) error {
 	if fs.NArg() != 0 {
 		return usageErr(errors.New("import takes flags only"))
 	}
-	if *replace && strings.TrimSpace(*chat) != "" {
-		return usageErr(errors.New("--replace cannot be combined with --chat"))
+	if *restore && *replace {
+		return usageErr(errors.New("--restore and --replace are aliases; use only --restore"))
 	}
-	if *replace && *adoptSource {
-		return usageErr(errors.New("--replace cannot be combined with --adopt-source"))
+	restoreMode := *restore || *replace
+	if restoreMode && strings.TrimSpace(*chat) != "" {
+		return usageErr(errors.New("--restore cannot be combined with --chat"))
+	}
+	if restoreMode && *adoptSource {
+		return usageErr(errors.New("--restore cannot be combined with --adopt-source"))
 	}
 	return r.withStore(func(st *store.Store) error {
 		mediaStage, err := os.MkdirTemp(filepath.Dir(st.Path()), ".telecrawl-import-media-*")
@@ -183,7 +188,7 @@ func (r *runtime) runImport(args []string) error {
 		defer func() { _ = os.RemoveAll(mediaStage) }()
 		var existingMediaSourcePath string
 		var existingMediaRefs []telegramdesktop.ExistingMediaRef
-		if *fetchMedia && !*replace {
+		if *fetchMedia && !restoreMode {
 			existingMediaSourcePath, existingMediaRefs, err = existingMediaRefsForImport(r.ctx, st)
 			if err != nil {
 				return err
@@ -207,12 +212,12 @@ func (r *runtime) runImport(args []string) error {
 		if err := prepareImportResultSource(&result); err != nil {
 			return err
 		}
-		if !*replace {
+		if !restoreMode {
 			if err := st.ValidateMergeSource(r.ctx, result.Stats, result.Messages); err != nil {
 				return err
 			}
 		}
-		if !*replace {
+		if !restoreMode {
 			if err := preserveExistingMediaRefs(r.ctx, st, result.Stats.SourcePath, result.Messages, true); err != nil {
 				return err
 			}
@@ -220,18 +225,18 @@ func (r *runtime) runImport(args []string) error {
 		if err := promoteImportMedia(&result, mediaStage, filepath.Join(filepath.Dir(st.Path()), "media")); err != nil {
 			return err
 		}
-		if err := storeImportResult(r.ctx, st, &result, *chat, *replace); err != nil {
+		if err := storeImportResult(r.ctx, st, &result, *chat, restoreMode); err != nil {
 			return err
 		}
 		return r.print(result.Stats)
 	})
 }
 
-func storeImportResult(ctx context.Context, st *store.Store, result *telegramdesktop.ImportResult, chatFilter string, replace bool) error {
+func storeImportResult(ctx context.Context, st *store.Store, result *telegramdesktop.ImportResult, chatFilter string, restore bool) error {
 	if err := prepareImportResultSource(result); err != nil {
 		return err
 	}
-	if !replace {
+	if !restore {
 		if err := preserveExistingMediaRefs(ctx, st, result.Stats.SourcePath, result.Messages, true); err != nil {
 			return err
 		}
@@ -241,13 +246,13 @@ func storeImportResult(ctx context.Context, st *store.Store, result *telegramdes
 	}
 	refreshImportMediaStats(result)
 	if strings.TrimSpace(chatFilter) == "" {
-		if replace {
+		if restore {
 			return st.ReplaceAll(ctx, result.Stats, result.Contacts, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages)
 		}
 		return st.MergeAll(ctx, result.Stats, result.Contacts, result.Chats, result.Folders, result.FolderChats, result.Topics, result.Messages)
 	}
-	if replace {
-		return errors.New("--replace cannot be combined with --chat")
+	if restore {
+		return errors.New("--restore cannot be combined with --chat")
 	}
 	if len(result.Chats) == 0 {
 		return fmt.Errorf("telegram import returned no chats for --chat %s", chatFilter)
@@ -1001,8 +1006,15 @@ func (r *runtime) backupPush(args []string) error {
 
 func (r *runtime) backupPull(args []string) error {
 	fs, opts, _ := backupFlags("telecrawl backup pull")
+	fs.BoolVar(&opts.Restore, "restore", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
+	}
+	if fs.NArg() != 0 {
+		return usageErr(errors.New("backup pull takes flags only"))
+	}
+	if strings.TrimSpace(opts.Ref) != "" && !opts.Restore {
+		return usageErr(errors.New("backup pull --ref requires --restore because historical snapshots replace local rows"))
 	}
 	return r.withStore(func(st *store.Store) error {
 		result, err := backup.Pull(r.ctx, st, *opts)
@@ -1193,7 +1205,7 @@ func printUsage(w io.Writer) {
 usage:
   telecrawl [--json] doctor [--path PATH]
   telecrawl [--json] metadata
-  telecrawl [--json] import [--path PATH] [--chat ID] [--dialogs-limit N] [--messages-limit N] [--fetch-media] [--adopt-source] [--replace]
+  telecrawl [--json] import [--path PATH] [--chat ID] [--dialogs-limit N] [--messages-limit N] [--fetch-media] [--adopt-source] [--restore]
   telecrawl [--json] status
   telecrawl [--json] folders
   telecrawl [--json] contacts [--limit N]
@@ -1202,12 +1214,12 @@ usage:
   telecrawl [--json] topics --chat ID [--limit N]
   telecrawl [--json] messages [--chat ID] [--topic ID] [--limit N] [--after DATE]
   telecrawl [--json] search "query" [--chat ID] [--topic ID]
-  telecrawl [--json] backup init|push|pull|status|snapshots
+  telecrawl [--json] backup init|push|pull [--restore]|status|snapshots
   telecrawl version
 
 notes:
   import auto-detects Telegram Desktop tdata or native macOS Postbox data
-  import merges by default; --replace first deletes the entire existing archive
+  imports and backup pulls merge by default; --restore replaces the entire existing archive
   --adopt-source non-destructively records a verified legacy archive's current source
   import archives local cached Postbox media by default; --fetch-media also tries Telegram cloud media
   backup writes encrypted age shards to a git repo

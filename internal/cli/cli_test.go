@@ -158,8 +158,8 @@ func TestStoreImportResultRejectsRetargetedSourceSymlink(t *testing.T) {
 	result.Stats.SourceIdentity = "test:b"
 	result.Messages[0].Text = "wrong source"
 	err = storeImportResult(ctx, st, &result, "", false)
-	if err == nil || !strings.Contains(err.Error(), "use --replace") {
-		t.Fatalf("error = %v, want source mismatch requiring --replace", err)
+	if err == nil || !strings.Contains(err.Error(), "use --restore") {
+		t.Fatalf("error = %v, want source mismatch requiring --restore", err)
 	}
 	messages, err := st.Messages(ctx, store.MessageFilter{Limit: 10})
 	if err != nil {
@@ -753,12 +753,12 @@ func TestUsageDocumentsMediaFetchOptIn(t *testing.T) {
 	}
 }
 
-func TestUsageDocumentsDestructiveReplace(t *testing.T) {
+func TestUsageDocumentsExplicitRestore(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 	printUsage(&out)
-	if !strings.Contains(out.String(), "--replace first deletes the entire existing archive") {
-		t.Fatalf("usage should document destructive replace:\n%s", out.String())
+	if !strings.Contains(out.String(), "--restore replaces the entire existing archive") {
+		t.Fatalf("usage should document explicit restore:\n%s", out.String())
 	}
 }
 
@@ -766,7 +766,7 @@ func TestImportRejectsReplaceWithChat(t *testing.T) {
 	t.Parallel()
 	var out, errOut bytes.Buffer
 	err := Run(context.Background(), []string{"import", "--replace", "--chat", "100"}, &out, &errOut)
-	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--replace cannot be combined with --chat") {
+	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--restore cannot be combined with --chat") {
 		t.Fatalf("error = %v (exit %d), want usage error", err, ExitCode(err))
 	}
 }
@@ -775,8 +775,32 @@ func TestImportRejectsReplaceWithAdoptSource(t *testing.T) {
 	t.Parallel()
 	var out, errOut bytes.Buffer
 	err := Run(context.Background(), []string{"import", "--replace", "--adopt-source"}, &out, &errOut)
-	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--replace cannot be combined with --adopt-source") {
+	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--restore cannot be combined with --adopt-source") {
 		t.Fatalf("error = %v (exit %d), want usage error", err, ExitCode(err))
+	}
+}
+
+func TestImportRejectsRestoreWithChatOrAdoptSource(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{
+		{"import", "--restore", "--chat", "100"},
+		{"import", "--restore", "--adopt-source"},
+		{"import", "--restore", "--replace"},
+	} {
+		var out, errOut bytes.Buffer
+		err := Run(context.Background(), args, &out, &errOut)
+		if err == nil || ExitCode(err) != 2 {
+			t.Fatalf("args=%v error=%v, want usage error", args, err)
+		}
+	}
+}
+
+func TestBackupHistoricalPullRequiresRestoreBeforeIO(t *testing.T) {
+	t.Parallel()
+	var out, errOut bytes.Buffer
+	err := Run(context.Background(), []string{"backup", "pull", "--ref", "snapshot/old"}, &out, &errOut)
+	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "requires --restore") {
+		t.Fatalf("error = %v, want historical restore usage error", err)
 	}
 }
 

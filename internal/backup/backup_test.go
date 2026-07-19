@@ -22,10 +22,11 @@ func TestEncryptedBackupPushPull(t *testing.T) {
 	source := openFixtureStore(t, "source.db")
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	data := store.SnapshotData{
-		Contacts:     []store.Contact{{JID: "alice@s.whatsapp.net", FullName: "Alice", UpdatedAt: now}},
-		Chats:        []store.Chat{{JID: "chat@g.us", Kind: "group", Name: "Launch Group", LastMessageAt: now}},
-		Groups:       []store.Group{{JID: "chat@g.us", Name: "Launch Group", OwnerJID: "owner@s.whatsapp.net", CreatedAt: now}},
-		Participants: []store.GroupParticipant{{GroupJID: "chat@g.us", UserJID: "alice@s.whatsapp.net", ContactName: "Alice", IsAdmin: true, IsActive: true}},
+		SourceIdentity: "test:telegram",
+		Contacts:       []store.Contact{{JID: "alice@s.whatsapp.net", FullName: "Alice", UpdatedAt: now}},
+		Chats:          []store.Chat{{JID: "chat@g.us", Kind: "group", Name: "Launch Group", LastMessageAt: now}},
+		Groups:         []store.Group{{JID: "chat@g.us", Name: "Launch Group", OwnerJID: "owner@s.whatsapp.net", CreatedAt: now}},
+		Participants:   []store.GroupParticipant{{GroupJID: "chat@g.us", UserJID: "alice@s.whatsapp.net", ContactName: "Alice", IsAdmin: true, IsActive: true}},
 		Messages: []store.Message{
 			{SourcePK: 1, ChatJID: "chat@g.us", ChatName: "Launch Group", MessageID: "a", SenderJID: "alice@s.whatsapp.net", SenderName: "Alice", Timestamp: now, Text: "secret launch text", RawType: 0, MessageType: "text"},
 		},
@@ -72,8 +73,15 @@ func TestEncryptedBackupPushPull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !manifest.Encrypted || manifest.Counts.Messages != 1 {
+	if !manifest.Encrypted || manifest.Counts.Messages != 1 || manifest.Counts.Metadata != 1 {
 		t.Fatalf("unexpected manifest: %+v", manifest)
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(repo, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(manifestBytes, []byte("test:telegram")) {
+		t.Fatal("cleartext manifest exposed Telegram source identity")
 	}
 	ciphertext, err := os.ReadFile(filepath.Join(repo, filepath.FromSlash(manifest.Shards[len(manifest.Shards)-1].Path))) // #nosec G304 -- test reads a generated shard path from its temp repo manifest.
 	if err != nil {
@@ -97,6 +105,13 @@ func TestEncryptedBackupPushPull(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].Text != "secret launch text" {
 		t.Fatalf("restore search mismatch: %+v", results)
+	}
+	restoredData, err := restored.ExportAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoredData.SourceIdentity != "test:telegram" {
+		t.Fatalf("restored source identity = %q", restoredData.SourceIdentity)
 	}
 
 	secondIdentity := filepath.Join(t.TempDir(), "second-age.key")
@@ -172,8 +187,9 @@ func TestHistoricalSnapshotRestore(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
 	data := store.SnapshotData{
-		Chats:    []store.Chat{{JID: "chat", Kind: "dm", Name: "Chat", LastMessageAt: now}},
-		Messages: []store.Message{{SourcePK: 1, ChatJID: "chat", MessageID: "one", Timestamp: now, Text: "first snapshot", RawType: 0}},
+		SourceIdentity: "test:telegram",
+		Chats:          []store.Chat{{JID: "chat", Kind: "dm", Name: "Chat", LastMessageAt: now}},
+		Messages:       []store.Message{{SourcePK: 1, ChatJID: "chat", MessageID: "one", Timestamp: now, Text: "first snapshot", RawType: 0}},
 	}
 	st := openFixtureStore(t, "source.db")
 	if err := st.ImportSnapshot(ctx, data, "/fixture", now); err != nil {
@@ -213,7 +229,10 @@ func TestHistoricalSnapshotRestore(t *testing.T) {
 		t.Fatalf("unexpected snapshots repo=%s snapshots=%+v", snapshotsRepo, snapshots)
 	}
 	restored := openFixtureStore(t, "restored.db")
-	pulled, err := Pull(ctx, restored, Options{ConfigPath: configPath, Ref: "snapshot/initial"})
+	if _, err := Pull(ctx, restored, Options{ConfigPath: configPath, Ref: "snapshot/initial"}); err == nil || !strings.Contains(err.Error(), "requires --restore") {
+		t.Fatalf("historical merge error = %v, want explicit restore requirement", err)
+	}
+	pulled, err := Pull(ctx, restored, Options{ConfigPath: configPath, Ref: "snapshot/initial", Restore: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,6 +248,165 @@ func TestHistoricalSnapshotRestore(t *testing.T) {
 	}
 	if _, err := Push(ctx, st, Options{ConfigPath: configPath, Push: false, Tag: "snapshot/initial"}); err == nil {
 		t.Fatal("moving an immutable snapshot tag should fail")
+	}
+}
+
+func TestBackupPullMergesByDefaultAndRestoresExplicitly(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	source := openFixtureStore(t, "merge-source.db")
+	sourceStats := store.ImportStats{SourcePath: t.TempDir(), SourcePathCanonical: true, SourceIdentity: "test:source", FinishedAt: now}
+	chat := store.Chat{JID: "100", Kind: "chat", Name: "source"}
+	message := store.Message{SourcePK: 1, ChatJID: "100", MessageID: "source", Timestamp: now, Text: "source message"}
+	if err := source.MergeAll(ctx, sourceStats, nil, []store.Chat{chat}, nil, nil, nil, []store.Message{message}); err != nil {
+		t.Fatal(err)
+	}
+	edited := message
+	edited.Text = "source edited"
+	edited.EditTime = now.Add(time.Minute)
+	sourceStats.FinishedAt = now.Add(2 * time.Minute)
+	if err := source.MergeAll(ctx, sourceStats, nil, []store.Chat{chat}, nil, nil, nil, []store.Message{edited}); err != nil {
+		t.Fatal(err)
+	}
+
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	runGit(t, "", "init", "--bare", remote)
+	repo := filepath.Join(t.TempDir(), "backup")
+	identity := filepath.Join(t.TempDir(), "age.key")
+	configPath := filepath.Join(t.TempDir(), "backup.json")
+	if _, _, err := Init(ctx, Options{ConfigPath: configPath, Repo: repo, Remote: remote, Identity: identity, Push: false}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Push(ctx, source, Options{ConfigPath: configPath, Push: false}); err != nil {
+		t.Fatal(err)
+	}
+
+	destination := openFixtureStore(t, "merge-destination.db")
+	local := store.SnapshotData{
+		SourceIdentity: "test:source",
+		Chats:          []store.Chat{{JID: "200", Kind: "chat", Name: "local"}},
+		Messages:       []store.Message{{SourcePK: 2, ChatJID: "200", MessageID: "local", Timestamp: now, Text: "destination only"}},
+	}
+	if err := destination.RestoreSnapshot(ctx, local, "fixture:local", now); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := Pull(ctx, destination, Options{ConfigPath: configPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Mode != "merge" {
+		t.Fatalf("pull mode = %q, want merge", merged.Mode)
+	}
+	messages, err := destination.Messages(ctx, store.MessageFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("merged messages = %#v, want source + destination", messages)
+	}
+	exported, err := destination.ExportAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exported.Revisions) != 3 {
+		t.Fatalf("merged revision events = %#v, want source created + edited and destination baseline", exported.Revisions)
+	}
+	otherAccount := openFixtureStore(t, "other-account.db")
+	if err := otherAccount.RestoreSnapshot(ctx, store.SnapshotData{
+		SourceIdentity: "test:other",
+		Chats:          []store.Chat{{JID: "100", Kind: "chat"}},
+		Messages:       []store.Message{{SourcePK: 99, ChatJID: "100", MessageID: "source", Timestamp: now, Text: "other account collision"}},
+	}, "fixture:other", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Pull(ctx, otherAccount, Options{ConfigPath: configPath}); err == nil || !strings.Contains(err.Error(), "different Telegram source identity") {
+		t.Fatalf("cross-account backup merge error = %v", err)
+	}
+	restored, err := Pull(ctx, destination, Options{ConfigPath: configPath, Restore: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Mode != "restore" {
+		t.Fatalf("pull mode = %q, want restore", restored.Mode)
+	}
+	messages, err = destination.Messages(ctx, store.MessageFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Text != "source edited" {
+		t.Fatalf("restored messages = %#v, want exact source", messages)
+	}
+}
+
+func TestBackupPushRemovesStaleAccountMetadataForLegacySnapshot(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	st := openFixtureStore(t, "metadata-source.db")
+	identified := store.SnapshotData{
+		SourceIdentity: "test:account-a",
+		Chats:          []store.Chat{{JID: "100", Kind: "chat"}},
+		Messages:       []store.Message{{SourcePK: 1, ChatJID: "100", MessageID: "1", Timestamp: now, Text: "identified"}},
+	}
+	if err := st.RestoreSnapshot(ctx, identified, "fixture:identified", now); err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(t.TempDir(), "backup")
+	if err := os.MkdirAll(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	identity := filepath.Join(t.TempDir(), "age.key")
+	recipient, err := EnsureIdentity(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{Repo: repo, Identity: identity, Recipients: []string{recipient}, Push: false}
+	runGit(t, repo, "init")
+	if _, err := Push(ctx, st, opts); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := readManifest(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Counts.Metadata != 1 {
+		t.Fatalf("identified metadata count = %d", manifest.Counts.Metadata)
+	}
+	legacy := identified
+	legacy.SourceIdentity = ""
+	legacy.Messages[0].Text = "legacy unknown identity"
+	if err := st.RestoreSnapshot(ctx, legacy, "fixture:legacy", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Push(ctx, st, opts); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err = readManifest(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Counts.Metadata != 0 {
+		t.Fatalf("legacy metadata count = %d, want zero", manifest.Counts.Metadata)
+	}
+	for _, shard := range manifest.Shards {
+		if shard.Table == "archive_metadata" {
+			t.Fatalf("legacy snapshot retained stale account shard: %+v", shard)
+		}
+	}
+}
+
+func TestMessageRevisionShardsPartitionByEventMonth(t *testing.T) {
+	t.Parallel()
+	revisions := []store.MessageRevision{
+		{EventID: "feb", EventAt: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)},
+		{EventID: "jan-b", EventAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)},
+		{EventID: "jan-a", EventAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+	}
+	shards := messageRevisionShards(revisions)
+	if len(shards) != 2 || shards[0].path != "data/message_revisions/2026/01.jsonl.gz.age" || shards[1].path != "data/message_revisions/2026/02.jsonl.gz.age" {
+		t.Fatalf("revision shards = %#v", shards)
+	}
+	if len(shards[0].revisions) != 2 || shards[0].revisions[0].EventID != "jan-a" || shards[0].revisions[1].EventID != "jan-b" {
+		t.Fatalf("January revision order = %#v", shards[0].revisions)
 	}
 }
 
@@ -465,8 +643,12 @@ func TestSnapshotErrorAndUtilityPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := duplicateData.Validate(); err == nil {
-		t.Fatal("expected duplicate restored data validation error")
+	duplicateData.NormalizeLegacyEventIDs()
+	if err := duplicateData.Validate(); err != nil {
+		t.Fatalf("v5 source_pk collision should validate after legacy event normalization: %v", err)
+	}
+	if duplicateData.Messages[0].EventID == duplicateData.Messages[1].EventID {
+		t.Fatal("legacy messages received duplicate event identities")
 	}
 	if err := ckbackup.WriteManifest(repo, toCrawlkitManifest(Manifest{Format: formatVersion})); err != nil {
 		t.Fatal(err)
@@ -544,6 +726,12 @@ func TestBackupReadmeUsesSupportedStatusCommand(t *testing.T) {
 	}
 	if !strings.Contains(body, "telecrawl status") {
 		t.Fatal("backup README omits the supported status command")
+	}
+	if !strings.Contains(body, "data/message_revisions/YYYY/MM.jsonl.gz.age") || !strings.Contains(body, "data/archive_metadata.jsonl.gz.age") {
+		t.Fatal("backup README omits revision sharding or encrypted archive metadata")
+	}
+	if strings.Contains(body, "data/message_revisions.jsonl.gz.age") {
+		t.Fatal("backup README advertises the obsolete flat revision shard")
 	}
 }
 
