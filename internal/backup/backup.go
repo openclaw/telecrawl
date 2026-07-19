@@ -26,6 +26,7 @@ type Manifest struct {
 }
 
 type Counts struct {
+	Metadata     int `json:"archive_metadata,omitempty"`
 	Contacts     int `json:"contacts"`
 	Chats        int `json:"chats"`
 	Folders      int `json:"folders"`
@@ -34,6 +35,11 @@ type Counts struct {
 	Participants int `json:"participants"`
 	Topics       int `json:"topics"`
 	Messages     int `json:"messages"`
+	Revisions    int `json:"message_revisions"`
+}
+
+type archiveMetadata struct {
+	SourceIdentity string `json:"source_identity"`
 }
 
 type ShardEntry = ckbackup.ShardEntry
@@ -46,6 +52,7 @@ type Result struct {
 	Messages  int    `json:"messages"`
 	Ref       string `json:"ref,omitempty"`
 	Tag       string `json:"tag,omitempty"`
+	Mode      string `json:"mode,omitempty"`
 }
 
 func Init(ctx context.Context, opts Options) (Config, string, error) {
@@ -121,6 +128,9 @@ func Push(ctx context.Context, st *store.Store, opts Options) (Result, error) {
 }
 
 func Pull(ctx context.Context, st *store.Store, opts Options) (Result, error) {
+	if strings.TrimSpace(opts.Ref) != "" && !opts.Restore {
+		return Result{}, fmt.Errorf("backup pull --ref requires --restore because historical snapshots replace local rows")
+	}
 	cfg, err := ResolveOptions(opts)
 	if err != nil {
 		return Result{}, err
@@ -145,6 +155,7 @@ func Pull(ctx context.Context, st *store.Store, opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	data.NormalizeLegacyEventIDs()
 	if err := data.Validate(); err != nil {
 		return Result{}, err
 	}
@@ -152,10 +163,17 @@ func Pull(ctx context.Context, st *store.Store, opts Options) (Result, error) {
 	if ref != "" {
 		sourcePath += "@" + ref
 	}
-	if err := st.ImportSnapshot(ctx, data, sourcePath, manifest.Exported); err != nil {
+	mode := "merge"
+	if opts.Restore {
+		mode = "restore"
+		err = st.RestoreSnapshot(ctx, data, sourcePath, manifest.Exported)
+	} else {
+		err = st.ImportSnapshot(ctx, data, sourcePath, manifest.Exported)
+	}
+	if err != nil {
 		return Result{}, err
 	}
-	return Result{Repo: cfg.Repo, Changed: true, Encrypted: manifest.Encrypted, Shards: len(manifest.Shards), Messages: len(data.Messages), Ref: ref}, nil
+	return Result{Repo: cfg.Repo, Changed: true, Encrypted: manifest.Encrypted, Shards: len(manifest.Shards), Messages: len(data.Messages), Ref: ref, Mode: mode}, nil
 }
 
 func Status(ctx context.Context, opts Options) (Manifest, string, error) {
@@ -174,7 +192,11 @@ func Status(ctx context.Context, opts Options) (Manifest, string, error) {
 }
 
 func writeSnapshot(ctx context.Context, cfg Config, data store.SnapshotData, old Manifest) (Manifest, error) {
-	shards := []ckbackup.Shard{
+	shards := make([]ckbackup.Shard, 0, 9)
+	if strings.TrimSpace(data.SourceIdentity) != "" {
+		shards = append(shards, ckbackup.Shard{Table: "archive_metadata", Path: "data/archive_metadata.jsonl.gz.age", Rows: []archiveMetadata{{SourceIdentity: data.SourceIdentity}}})
+	}
+	shards = append(shards, []ckbackup.Shard{
 		{Table: "contacts", Path: "data/contacts.jsonl.gz.age", Rows: data.Contacts},
 		{Table: "chats", Path: "data/chats.jsonl.gz.age", Rows: data.Chats},
 		{Table: "folders", Path: "data/folders.jsonl.gz.age", Rows: data.Folders},
@@ -182,19 +204,33 @@ func writeSnapshot(ctx context.Context, cfg Config, data store.SnapshotData, old
 		{Table: "groups", Path: "data/groups.jsonl.gz.age", Rows: data.Groups},
 		{Table: "group_participants", CountKey: "participants", Path: "data/group_participants.jsonl.gz.age", Rows: data.Participants},
 		{Table: "topics", Path: "data/topics.jsonl.gz.age", Rows: data.Topics},
+	}...)
+	for _, shard := range messageRevisionShards(data.Revisions) {
+		shards = append(shards, ckbackup.Shard{Table: "message_revisions", Path: shard.path, Rows: shard.revisions})
 	}
 	for _, shard := range messageShards(data.Messages) {
 		shards = append(shards, ckbackup.Shard{Table: "messages", Path: shard.path, Rows: shard.messages})
 	}
 	sharedOld := toCrawlkitManifest(old)
+	if strings.TrimSpace(data.SourceIdentity) == "" {
+		delete(sharedOld.Counts, "archive_metadata")
+	}
 	if len(data.Messages) == 0 {
 		delete(sharedOld.Counts, "messages")
+	}
+	if len(data.Revisions) == 0 {
+		delete(sharedOld.Counts, "message_revisions")
 	}
 	manifest, err := ckbackup.WriteSnapshot(ctx, crawlkitConfig(cfg), shards, sharedOld)
 	if err != nil {
 		return Manifest{}, err
 	}
 	manifest.Counts["contacts"] = len(data.Contacts)
+	if strings.TrimSpace(data.SourceIdentity) != "" {
+		manifest.Counts["archive_metadata"] = 1
+	} else {
+		delete(manifest.Counts, "archive_metadata")
+	}
 	manifest.Counts["chats"] = len(data.Chats)
 	manifest.Counts["folders"] = len(data.Folders)
 	manifest.Counts["folder_chats"] = len(data.FolderChats)
@@ -202,6 +238,7 @@ func writeSnapshot(ctx context.Context, cfg Config, data store.SnapshotData, old
 	manifest.Counts["participants"] = len(data.Participants)
 	manifest.Counts["topics"] = len(data.Topics)
 	manifest.Counts["messages"] = len(data.Messages)
+	manifest.Counts["message_revisions"] = len(data.Revisions)
 	if ckbackup.EquivalentManifest(toCrawlkitManifest(old), manifest) {
 		return old, nil
 	}
@@ -223,6 +260,15 @@ func decodeSnapshot(shards []ckbackup.DecodedShard) (store.SnapshotData, error) 
 	var data store.SnapshotData
 	for _, shard := range shards {
 		switch shard.Entry.Table {
+		case "archive_metadata":
+			var metadata []archiveMetadata
+			if err := ckbackup.DecodeJSONL(shard.Plaintext, &metadata); err != nil {
+				return store.SnapshotData{}, err
+			}
+			if len(metadata) != 1 || strings.TrimSpace(metadata[0].SourceIdentity) == "" {
+				return store.SnapshotData{}, fmt.Errorf("archive metadata must contain exactly one source identity")
+			}
+			data.SourceIdentity = metadata[0].SourceIdentity
 		case "contacts":
 			if err := ckbackup.DecodeJSONL(shard.Plaintext, &data.Contacts); err != nil {
 				return store.SnapshotData{}, err
@@ -257,6 +303,12 @@ func decodeSnapshot(shards []ckbackup.DecodedShard) (store.SnapshotData, error) 
 				return store.SnapshotData{}, err
 			}
 			data.Messages = append(data.Messages, messages...)
+		case "message_revisions":
+			var revisions []store.MessageRevision
+			if err := ckbackup.DecodeJSONL(shard.Plaintext, &revisions); err != nil {
+				return store.SnapshotData{}, err
+			}
+			data.Revisions = append(data.Revisions, revisions...)
 		default:
 			return store.SnapshotData{}, fmt.Errorf("unknown backup table %q", shard.Entry.Table)
 		}
@@ -267,12 +319,54 @@ func decodeSnapshot(shards []ckbackup.DecodedShard) (store.SnapshotData, error) 
 		}
 		return data.Messages[i].Timestamp.Before(data.Messages[j].Timestamp)
 	})
+	sort.Slice(data.Revisions, func(i, j int) bool {
+		if data.Revisions[i].EventAt.Equal(data.Revisions[j].EventAt) {
+			return data.Revisions[i].EventID < data.Revisions[j].EventID
+		}
+		return data.Revisions[i].EventAt.Before(data.Revisions[j].EventAt)
+	})
 	return data, nil
 }
 
 type messageShard struct {
 	path     string
 	messages []store.Message
+}
+
+type messageRevisionShard struct {
+	path      string
+	revisions []store.MessageRevision
+}
+
+func messageRevisionShards(revisions []store.MessageRevision) []messageRevisionShard {
+	buckets := map[string][]store.MessageRevision{}
+	for _, revision := range revisions {
+		t := revision.EventAt.UTC()
+		year, month := "unknown", "00"
+		if !t.IsZero() {
+			year = fmt.Sprintf("%04d", t.Year())
+			month = fmt.Sprintf("%02d", int(t.Month()))
+		}
+		rel := fmt.Sprintf("data/message_revisions/%s/%s.jsonl.gz.age", year, month)
+		buckets[rel] = append(buckets[rel], revision)
+	}
+	paths := make([]string, 0, len(buckets))
+	for path := range buckets {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	out := make([]messageRevisionShard, 0, len(paths))
+	for _, path := range paths {
+		values := buckets[path]
+		sort.Slice(values, func(i, j int) bool {
+			if values[i].EventAt.Equal(values[j].EventAt) {
+				return values[i].EventID < values[j].EventID
+			}
+			return values[i].EventAt.Before(values[j].EventAt)
+		})
+		out = append(out, messageRevisionShard{path: path, revisions: values})
+	}
+	return out
 }
 
 func messageShards(messages []store.Message) []messageShard {
@@ -319,22 +413,27 @@ func crawlkitConfig(cfg Config) ckbackup.Config {
 }
 
 func toCrawlkitManifest(manifest Manifest) ckbackup.Manifest {
+	counts := map[string]int{
+		"contacts":          manifest.Counts.Contacts,
+		"chats":             manifest.Counts.Chats,
+		"folders":           manifest.Counts.Folders,
+		"folder_chats":      manifest.Counts.FolderChats,
+		"groups":            manifest.Counts.Groups,
+		"participants":      manifest.Counts.Participants,
+		"topics":            manifest.Counts.Topics,
+		"messages":          manifest.Counts.Messages,
+		"message_revisions": manifest.Counts.Revisions,
+	}
+	if manifest.Counts.Metadata > 0 {
+		counts["archive_metadata"] = manifest.Counts.Metadata
+	}
 	return ckbackup.Manifest{
 		Format:     manifest.Format,
 		Encrypted:  manifest.Encrypted,
 		Exported:   manifest.Exported,
 		Recipients: manifest.Recipients,
-		Counts: map[string]int{
-			"contacts":     manifest.Counts.Contacts,
-			"chats":        manifest.Counts.Chats,
-			"folders":      manifest.Counts.Folders,
-			"folder_chats": manifest.Counts.FolderChats,
-			"groups":       manifest.Counts.Groups,
-			"participants": manifest.Counts.Participants,
-			"topics":       manifest.Counts.Topics,
-			"messages":     manifest.Counts.Messages,
-		},
-		Shards: manifest.Shards,
+		Counts:     counts,
+		Shards:     manifest.Shards,
 	}
 }
 
@@ -349,6 +448,7 @@ func fromCrawlkitManifest(manifest ckbackup.Manifest) Manifest {
 		Exported:   manifest.Exported,
 		Recipients: manifest.Recipients,
 		Counts: Counts{
+			Metadata:     manifest.Counts["archive_metadata"],
 			Contacts:     manifest.Counts["contacts"],
 			Chats:        manifest.Counts["chats"],
 			Folders:      manifest.Counts["folders"],
@@ -357,6 +457,7 @@ func fromCrawlkitManifest(manifest ckbackup.Manifest) Manifest {
 			Participants: participants,
 			Topics:       manifest.Counts["topics"],
 			Messages:     manifest.Counts["messages"],
+			Revisions:    manifest.Counts["message_revisions"],
 		},
 		Shards: manifest.Shards,
 	}
@@ -387,6 +488,8 @@ data/groups.jsonl.gz.age
 data/group_participants.jsonl.gz.age
 data/topics.jsonl.gz.age
 data/messages/YYYY/MM.jsonl.gz.age
+data/message_revisions/YYYY/MM.jsonl.gz.age
+data/archive_metadata.jsonl.gz.age  # present when a Telegram source identity is known
 ` + "```" + `
 
 ` + "`manifest.json`" + ` is cleartext and contains format version, export time,
@@ -430,14 +533,16 @@ tag names are visible Git metadata and should not contain sensitive text.
 
 ` + "```bash" + `
 telecrawl backup pull
+telecrawl backup pull --restore
 telecrawl backup snapshots
-telecrawl --db /tmp/telecrawl-history.db backup pull --ref snapshot/before-migration
+telecrawl --db /tmp/telecrawl-history.db backup pull --restore --ref snapshot/before-migration
 ` + "```" + `
 
 ` + "`backup pull`" + ` decrypts every shard with the local age identity, verifies the
-manifest hashes, validates the snapshot, and imports it into the configured
-telecrawl archive database. Historical refs are read directly from Git objects
-without changing this checkout's current branch.
+manifest hashes, validates the snapshot, and merges it into the configured
+telecrawl archive database. Destination-only rows and tombstones remain until
+an explicit ` + "`--restore`" + ` exactly replaces them. Historical refs require restore mode
+and are read directly from Git objects without changing this checkout's current branch.
 
 ## Recovery
 

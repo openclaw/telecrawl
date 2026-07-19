@@ -76,19 +76,27 @@ telecrawl import --dialogs-limit 0 --messages-limit 0
 For a destructive full restore, explicitly replace the archive with the import:
 
 ```bash
-telecrawl import --dialogs-limit 0 --messages-limit 0 --replace
+telecrawl import --dialogs-limit 0 --messages-limit 0 --restore
 ```
 
-`--replace` deletes all existing archive rows before storing the fetched import.
+`--restore` deletes all existing archive rows before storing the fetched import.
 It cannot be combined with `--chat`. Default merges require the same Telegram
 account identity as the existing archive, even when the source path is unchanged;
-use `--replace` when intentionally switching the archive to a different source.
+use `--restore` when intentionally switching the archive to a different source.
 On the first import after upgrading an archive with legacy source metadata, use
 `--adopt-source` once to assert that the current Telegram account belongs to
 this archive without deleting rows. Message overlap is not treated as account
 proof because different accounts can share the same group or channel history.
 `--adopt-source` cannot override a different already-canonical source and cannot
-be combined with `--replace`.
+be combined with `--restore`.
+
+Canonical chats, folders and memberships, topics, contacts, groups and
+participants, and messages retain explicit Telegram tombstones with deletion
+time, source, and reason. Missing rows in a bounded import are not deletions.
+Message identities remain stable across imports, and observable Telegram edits
+and explicit deletes are retained as append-only revision events. Upgrading an
+older archive seeds a baseline observation for every existing message before a
+later edit can replace its canonical payload.
 
 Add `--fetch-media` when you also want Telegram cloud media that is not cached
 locally:
@@ -224,11 +232,21 @@ telecrawl backup status
 telecrawl backup snapshots
 ```
 
-Restore into the current archive DB:
+Merge the latest backup into the current archive DB:
 
 ```bash
 telecrawl backup pull
 telecrawl status
+```
+
+Default pulls preserve destination-only rows and tombstones. Current backups
+carry the Telegram account identity inside an encrypted metadata shard, and a
+merge is rejected when that identity differs from the destination. Legacy
+backups without this identity can merge only into an empty archive; use explicit
+restore mode when the local archive must exactly match such a snapshot:
+
+```bash
+telecrawl backup pull --restore
 ```
 
 Every changed backup is a Git commit. Add a non-moving, visible checkpoint tag
@@ -237,7 +255,7 @@ backup checkout:
 
 ```bash
 telecrawl backup push --tag snapshot/before-migration
-telecrawl --db /tmp/telecrawl-history.db backup pull --ref snapshot/before-migration
+telecrawl --db /tmp/telecrawl-history.db backup pull --restore --ref snapshot/before-migration
 ```
 
 `backup snapshots --limit N` lists recent manifest-changing commits and tags.
@@ -246,7 +264,7 @@ Keep tag names non-sensitive because Git metadata is not encrypted.
 Restore into a throwaway DB for validation:
 
 ```bash
-telecrawl --db /tmp/telecrawl-restore-test.db backup pull
+telecrawl --db /tmp/telecrawl-restore-test.db backup pull --restore
 telecrawl --db /tmp/telecrawl-restore-test.db status
 ```
 

@@ -2,6 +2,14 @@
 
 ## [0.3.5] - Unreleased
 
+### Added
+
+- Preserve stable Telegram message identity and append-only revision events for baseline observations, observable message edits, and explicit deletes.
+
+### Changed
+
+- Add source-attributed tombstones to every canonical archive entity, propagate parent deletions to subordinate rows, and make account-bound backup pulls merge by default with exact replacement behind explicit `--restore`.
+
 ### Fixed
 
 - Harden release closeout against delayed GitHub asset digests, GoReleaser-added trailing note newlines, draft PATCH tag resets, and Homebrew versions that reject untapped formula files.

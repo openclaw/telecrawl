@@ -202,6 +202,8 @@ create table messages (
 	replies_count integer not null default 0,
 	pinned integer not null default 0
 );
+insert into messages(source_pk,chat_jid,msg_id,ts,from_me,text,raw_type,starred)
+values(7,'-10042','99',1234,0,'legacy payload',0,0);
 pragma user_version = 2;
 `); err != nil {
 		_ = db.Close()
@@ -216,10 +218,28 @@ pragma user_version = 2;
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"metadata_type", "metadata_title", "metadata_url", "metadata_json"} {
+	for _, name := range []string{"event_id", "metadata_type", "metadata_title", "metadata_url", "metadata_json", "deleted_at", "deletion_source", "deletion_reason"} {
 		if !cols[name] {
 			t.Fatalf("missing migrated column %q", name)
 		}
+	}
+	var eventID, text string
+	var sourcePK, ts int64
+	if err := st.db.QueryRowContext(ctx, `select event_id,source_pk,ts,text from messages`).Scan(&eventID, &sourcePK, &ts, &text); err != nil {
+		t.Fatal(err)
+	}
+	if eventID != stableMessageEventID("-10042", "99") || sourcePK != 7 || ts != 1234 || text != "legacy payload" {
+		t.Fatalf("migrated message = event=%q source_pk=%d ts=%d text=%q", eventID, sourcePK, ts, text)
+	}
+	var baselineType, baselinePayload string
+	if err := st.db.QueryRowContext(ctx, `select event_type,payload_json from message_revisions where message_event_id=?`, eventID).Scan(&baselineType, &baselinePayload); err != nil {
+		t.Fatal(err)
+	}
+	if baselineType != "message_observed" || !strings.Contains(baselinePayload, "legacy payload") {
+		t.Fatalf("legacy baseline = type %q payload %q", baselineType, baselinePayload)
+	}
+	if _, err := st.db.ExecContext(ctx, `insert into messages(event_id,source_pk,chat_jid,msg_id,ts,from_me,raw_type,starred) values(?,?,?,?,?,?,?,?)`, stableMessageEventID("-10042", "100"), sourcePK, "-10042", "100", ts+1, 0, 0, 0); err != nil {
+		t.Fatalf("source_pk remained globally unique after migration: %v", err)
 	}
 	var version int
 	if err := st.db.QueryRowContext(ctx, "pragma user_version").Scan(&version); err != nil {
@@ -227,6 +247,81 @@ pragma user_version = 2;
 	}
 	if version != schemaVersion {
 		t.Fatalf("user_version = %d, want %d", version, schemaVersion)
+	}
+	identity := "test:telegram"
+	if _, err := st.db.ExecContext(ctx, `insert into sync_state(key,value,updated_at) values('source_identity',?,?)`, identity, time.Now().UTC().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	fresh := openTestStore(t, filepath.Join(t.TempDir(), "fresh-v5.db"))
+	updated := Message{SourcePK: 9001, ChatJID: "-10042", MessageID: "99", Timestamp: fromUnix(ts), EditTime: time.Now().UTC().Add(time.Hour), Text: "fresh v5 payload"}
+	stats := ImportStats{SourcePath: t.TempDir(), SourcePathCanonical: true, SourceIdentity: identity, FinishedAt: time.Now().UTC()}
+	if err := fresh.ReplaceAll(ctx, stats, nil, []Chat{{JID: "-10042", Kind: "chat"}}, nil, nil, nil, []Message{updated}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := fresh.ExportAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ImportSnapshot(ctx, snapshot, "fixture:fresh-v5", time.Now().UTC().Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	var familyRows int
+	if err := st.db.QueryRowContext(ctx, `select count(*) from messages where chat_jid='-10042' and msg_id='99'`).Scan(&familyRows); err != nil {
+		t.Fatal(err)
+	}
+	if familyRows != 1 {
+		t.Fatalf("migrated/fresh snapshot identity family has %d rows, want 1", familyRows)
+	}
+}
+
+func TestLegacyDuplicateEventIDOrderingMatchesMigrationAndSnapshotRestore(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "event-order.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.ExecContext(ctx, `create table messages(
+		rowid integer primary key autoincrement,
+		event_id text,
+		source_pk integer not null unique,
+		chat_jid text not null,
+		msg_id text not null
+	);
+	insert into messages(source_pk,chat_jid,msg_id) values(20,'100','duplicate');
+	insert into messages(source_pk,chat_jid,msg_id) values(10,'100','duplicate');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := backfillMessageEventIDs(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	migrated := map[int64]string{}
+	rows, err := db.QueryContext(ctx, `select source_pk,event_id from messages`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var sourcePK int64
+		var eventID string
+		if err := rows.Scan(&sourcePK, &eventID); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		migrated[sourcePK] = eventID
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := SnapshotData{Messages: []Message{
+		{SourcePK: 20, ChatJID: "100", MessageID: "duplicate"},
+		{SourcePK: 10, ChatJID: "100", MessageID: "duplicate"},
+	}}
+	snapshot.NormalizeLegacyEventIDs()
+	for _, message := range snapshot.Messages {
+		if migrated[message.SourcePK] != message.EventID {
+			t.Fatalf("source_pk %d migration event %q != snapshot event %q", message.SourcePK, migrated[message.SourcePK], message.EventID)
+		}
 	}
 }
 
@@ -318,7 +413,7 @@ func TestMessagesToleratesNullableOptionalFields(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	st := openTestStore(t, filepath.Join(t.TempDir(), "nullable-messages.db"))
-	if _, err := st.db.ExecContext(ctx, `insert into messages(source_pk,chat_jid,msg_id,ts,from_me,raw_type,starred) values(?,?,?,?,?,?,?)`, 1, "42", "1", unix(time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)), 0, 0, 0); err != nil {
+	if _, err := st.db.ExecContext(ctx, `insert into messages(event_id,source_pk,chat_jid,msg_id,ts,from_me,raw_type,starred) values(?,?,?,?,?,?,?,?)`, stableMessageEventID("42", "1"), 1, "42", "1", unix(time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)), 0, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -467,8 +562,8 @@ func TestMergeAllPreservesHistoryOutsideImportWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fcsA) != 0 {
-		t.Fatalf("folder 1 chats = %v, want imported chat A removed", fcsA)
+	if len(fcsA) != 1 || fcsA[0].JID != "-1001" {
+		t.Fatalf("folder 1 chats = %v, want not-seen membership preserved", fcsA)
 	}
 
 	fcs, err := st.ChatsInFolder(ctx, "2", 10)
@@ -528,8 +623,8 @@ func TestMergeAllRejectsDifferentSource(t *testing.T) {
 	overwrite := original
 	overwrite.Text = "wrong source"
 	err := st.MergeAll(ctx, ImportStats{SourcePath: sourceB, SourcePathCanonical: true, SourceIdentity: "test:b", AdoptSource: true, FinishedAt: now}, nil, []Chat{chat}, nil, nil, nil, []Message{overwrite})
-	if err == nil || !strings.Contains(err.Error(), "use --replace") {
-		t.Fatalf("error = %v, want source mismatch requiring --replace", err)
+	if err == nil || !strings.Contains(err.Error(), "use --restore") {
+		t.Fatalf("error = %v, want source mismatch requiring --restore", err)
 	}
 	messages, err := st.Messages(ctx, MessageFilter{ChatJID: "100", Limit: 10})
 	if err != nil {
@@ -668,7 +763,7 @@ func TestReplaceAllClearsCanonicalSourceMarker(t *testing.T) {
 	}
 }
 
-func TestMergeAllReconcilesImportedChatFolders(t *testing.T) {
+func TestMergeAllDoesNotInferFolderMembershipDeletion(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
@@ -700,8 +795,8 @@ func TestMergeAllReconcilesImportedChatFolders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(oldFolder) != 1 || oldFolder[0].JID != "200" {
-		t.Fatalf("old folder chats = %#v, want only outside-window chat B", oldFolder)
+	if len(oldFolder) != 2 {
+		t.Fatalf("old folder chats = %#v, want both not-seen memberships preserved", oldFolder)
 	}
 	newFolder, err := st.ChatsInFolder(ctx, "2", 10)
 	if err != nil {
