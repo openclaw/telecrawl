@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.3.5] - Unreleased
+## [0.3.5] - 2026-07-26
 
 ### Added
 
@@ -9,7 +9,7 @@
 ### Changed
 
 - Move official publication to the shared signed, notarized, independently verified GitHub Actions pipeline while preserving archive names, `checksums.txt`, the stable code identifier, and Homebrew delivery.
-- Retain Telecrawl's post-publication byte-identical Linux/Windows rebuild verifier; integrating that proof as a shared pre-publication gate remains deferred.
+- Require the shared publication pipeline to independently rebuild every Linux and Windows binary, compare it byte-for-byte with the staged release archive, and bind both digests into the verified inventory before publication.
 - Add source-attributed tombstones to every canonical archive entity, propagate parent deletions to subordinate rows, and make account-bound backup pulls merge by default with exact replacement behind explicit `--restore`.
 - Standardize maintainer Make targets while preserving the serialized, fail-closed local release gates.
 

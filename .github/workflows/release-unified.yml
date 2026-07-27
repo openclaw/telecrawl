@@ -29,6 +29,7 @@ jobs:
       stable-identifier: ai.openclaw.telecrawl
       require-signed-tag: true
       darwin-universal: disabled
+      reproducible-rebuild: non-darwin
       ci-check-events: '["push","pull_request"]'
     secrets:
       MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}

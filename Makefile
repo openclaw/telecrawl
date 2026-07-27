@@ -70,7 +70,7 @@ release-pilot: ## Refuse the retired local pilot path and print the official CI 
 release-draft: ## Refuse the retired local draft path and print the official CI command.
 	./scripts/release-local draft
 
-verify-release: ## Verify draft artifacts natively for VERSION=vX.Y.Z.
+verify-release: ## Refuse the retired local verifier and print the official CI command.
 	@test -n "$(VERSION)" || (echo "usage: make verify-release VERSION=v0.3.5" >&2; exit 2)
 	./scripts/release-local verify-draft "$(VERSION)"
 
