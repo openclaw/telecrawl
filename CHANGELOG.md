@@ -9,6 +9,7 @@
 ### Changed
 
 - Add source-attributed tombstones to every canonical archive entity, propagate parent deletions to subordinate rows, and make account-bound backup pulls merge by default with exact replacement behind explicit `--restore`.
+- Standardize maintainer Make targets while preserving the serialized, fail-closed local release gates.
 
 ### Dependencies
 

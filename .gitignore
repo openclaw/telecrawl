@@ -1,4 +1,5 @@
 /telecrawl
+/bin/
 coverage.out
 dist/
 __pycache__/

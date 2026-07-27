@@ -23,13 +23,20 @@ snapshots do not receive signing or notarization credentials.
 Run each command only after its corresponding maintainer gate is granted:
 
 ```bash
-scripts/release-local --check
-scripts/release-local pilot v0.3.4
-scripts/release-local draft
-scripts/release-local verify-draft v0.3.4
-scripts/release-local publish v0.3.4
-scripts/release-local homebrew v0.3.4
+make release-check
+make release-pilot VERSION=v0.3.4
+make release-draft
+make verify-release VERSION=v0.3.4
+make release VERSION=v0.3.4
+make release-homebrew VERSION=v0.3.4
 ```
+
+`make release VERSION=vX.Y.Z` is the one official publication command. It
+delegates to the existing local release orchestrator, which refuses to publish
+until the exact draft inventory has passed both native artifact-verifier jobs.
+The surrounding targets retain the intentionally serialized pilot, draft,
+verification, and Homebrew gates. Use `make snapshot` for credential-free
+development artifacts; snapshots never publish.
 
 `pilot` is the only no-tag official-build path. It uses GoReleaser snapshot mode
 with an explicit proposed version, runs both Darwin binaries through
