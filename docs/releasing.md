@@ -1,6 +1,6 @@
 # Releasing
 
-`.github/workflows/release-unified.yml` is the only official publication path. It calls `openclaw/release-workflows@v1` from protected `main`, requires an existing repository-allowed SSH-signed tag, preserves Telecrawl's six binary-only platform archives and `checksums.txt`, signs and notarizes both thin macOS binaries as `ai.openclaw.telecrawl`, independently verifies the shared inventory on arm64 and Intel macOS, and waits for the `openclaw/homebrew-tap` handoff.
+`.github/workflows/release-unified.yml` is the only official publication path. It calls `openclaw/release-workflows@v1` from protected `main`, requires an existing repository-allowed SSH-signed tag, preserves Telecrawl's six binary-only platform archives and `checksums.txt`, signs and notarizes both thin macOS binaries as `ai.openclaw.telecrawl`, independently rebuilds every Linux and Windows binary and requires byte identity with the staged archives, independently verifies the shared inventory on arm64 and Intel macOS, and waits for the `openclaw/homebrew-tap` handoff.
 
 The public compatibility contract remains:
 
@@ -27,10 +27,10 @@ The release is complete only when the shared run publishes the exact asset inven
 
 ## Local diagnostics
 
-Local mutation paths are retired. `make release`, `make release-artifacts`, `make release-pilot`, `make release-draft`, `make release-homebrew`, and their `scripts/release-local` modes refuse and print the official workflow command. `make snapshot` and `make release-check` remain credential-free diagnostics. `make verify-release VERSION=vX.Y.Z` retains the read-only draft verifier for historical or investigative use.
+Local mutation and release-verification paths are retired. `make release`, `make release-artifacts`, `make release-pilot`, `make release-draft`, `make verify-release`, `make release-homebrew`, and their `scripts/release-local` modes refuse and print the official workflow command. `make snapshot` and `make release-check` remain credential-free diagnostics.
 
-## Supplemental reproducible-build verifier
+## Automated reproducible-build gate
 
-`.github/workflows/release-assets.yml` is retained only as a manual legacy verifier for pre-migration releases. It independently rebuilds Linux and Windows binaries and requires byte equality for the old exact seven-asset contract. It does not own publication or Homebrew, has no automatic release trigger, and is not compatible with the shared control-asset inventory.
+`reproducible-rebuild: non-darwin` is a mandatory pre-publication stage for every Telecrawl release. The shared pipeline rebuilds the exact frozen tag in a fresh read-only job with the primary build's pinned Go and GoReleaser versions, configuration, flags, and runner. That job cannot read the staged release payload. A separate clean job compares the complete rebuilt Linux and Windows binary set against the corresponding binaries extracted from the post-signing staged archives and fails closed on any missing, extra, or byte-different member.
 
-The shared pipeline does not currently expose a pre-publication external-verifier hook, so Telecrawl's former byte-identical rebuild proof is no longer a publication prerequisite. Moving this proof into the shared pre-publication chain is explicitly deferred; do not describe the shared release alone as reproducible-build proof.
+Each staged and rebuilt SHA-256 is recorded in `ASSET-INVENTORY.json`, rechecked by both independent macOS verifier jobs, and bound to the draft bytes before publication. Darwin is intentionally excluded because Developer ID signing and trusted timestamps change those bytes; the pipeline rejects `reproducible-rebuild: all` rather than claiming a vacuous Darwin proof.

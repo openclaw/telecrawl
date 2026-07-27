@@ -127,11 +127,15 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install GoReleaser for contract checks
+        uses: goreleaser/goreleaser-action@v7.2.3
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          install-only: true
+
       - name: Test local release contract
-        run: |
-          ./scripts/test-codesign-macos.sh
-          ./scripts/test-release-assets.sh
-          env -u GOTOOLCHAIN ./scripts/test-release-local.sh
+        run: env -u GOTOOLCHAIN ./scripts/release-local --check
 
       - name: Snapshot release build
         uses: goreleaser/goreleaser-action@v7.2.3
@@ -139,6 +143,9 @@ jobs:
           distribution: goreleaser
           version: "~> v2"
           args: release --snapshot --clean --skip=publish --parallelism=2
+
+      - name: Verify snapshot asset contract
+        run: ./scripts/test-release-assets.sh
 
   secrets:
     runs-on: ubuntu-latest
