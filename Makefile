@@ -59,6 +59,7 @@ check: ## Run every local gate enforced by CI.
 
 snapshot: ## Build credential-free snapshot artifacts without publishing.
 	GOWORK=off goreleaser release --snapshot --clean --skip=publish --parallelism=2
+	./scripts/test-release-assets.sh
 
 release-check: ## Validate the local signing, packaging, and release contracts.
 	env -u GOTOOLCHAIN ./scripts/release-local --check

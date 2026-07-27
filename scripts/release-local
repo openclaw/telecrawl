@@ -40,15 +40,22 @@ shift || true
 case "$mode" in
   --check)
     [[ "$#" -eq 0 ]] || usage
-    require_tools actionlint goreleaser
+    require_tools goreleaser
     goreleaser check
-    actionlint .github/workflows/release-unified.yml
+    if command -v actionlint >/dev/null 2>&1; then
+      actionlint .github/workflows/release-unified.yml
+    else
+      require_tools go
+      GOWORK=off go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 \
+        .github/workflows/release-unified.yml
+    fi
     grep -Fq 'uses: openclaw/release-workflows/.github/workflows/release-go-cli.yml@v1' \
       .github/workflows/release-unified.yml
     grep -Fq 'reproducible-rebuild: non-darwin' .github/workflows/release-unified.yml
     [[ ! -e .github/workflows/release-assets.yml ]]
     [[ ! -e scripts/rebuild-release-assets.sh ]]
     scripts/test-codesign-macos.sh
+    scripts/test-release-local.sh
     echo "release: unified workflow contract passed"
     ;;
   draft)
