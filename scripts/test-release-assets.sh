@@ -24,7 +24,9 @@ fail() {
 workflow="$root/.github/workflows/release-assets.yml"
 grep -Fq "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)" "$workflow" || fail "missing default-branch ref guard"
 grep -Fq "endsWith(github.workflow_ref, format('@refs/heads/{0}', github.event.repository.default_branch))" "$workflow" || fail "missing default-branch workflow_ref guard"
-grep -Fq "github.event_name == 'release' && github.event.action == 'published'" "$workflow" || fail "release-event job does not require action=published"
+if grep -Fq 'release:' "$workflow"; then
+  fail "legacy verifier must not run automatically for unified releases"
+fi
 grep -Fq "TRUSTED_SHA: \${{ github.workflow_sha }}" "$workflow" || fail "verifier is not pinned to trusted workflow code"
 grep -Fq "git -C trusted fetch --depth=1 --no-tags origin \"refs/heads/\$DEFAULT_BRANCH\"" "$workflow" || fail "verifier does not fetch the protected default branch"
 grep -Fq 'test "$GITHUB_REPOSITORY" = openclaw/telecrawl' "$workflow" || fail "workflow does not pin its repository identity"
@@ -33,8 +35,8 @@ grep -Fq "env -i PATH=\"\$go_dir:/usr/bin:/bin:/usr/sbin:/sbin\"" "$workflow" ||
 [[ "$(grep -Ec 'GH_TOKEN|GITHUB_TOKEN' "$workflow")" == 1 ]] || fail "workflow token is visible outside the download step"
 grep -Fq 'contents: write' "$workflow" || fail "draft verifier lacks push-level draft visibility"
 grep -Fq "assets at \${{ github.workflow_sha }}" "$workflow" || fail "run title is not bound to trusted verifier code"
-grep -Fq "for \${{ inputs.tag_commit || github.sha }}" "$workflow" || fail "run title is not bound to the exact tag commit"
-grep -Fq "object \${{ inputs.tag_object || 'release-event' }}" "$workflow" || fail "run title is not bound to the annotated tag object"
+grep -Fq 'for ${{ inputs.tag_commit }}' "$workflow" || fail "run title is not bound to the exact tag commit"
+grep -Fq 'object ${{ inputs.tag_object }}' "$workflow" || fail "run title is not bound to the annotated tag object"
 grep -Fq 'TELECRAWL_RELEASE_PROOF tag=%s object=%s commit=%s workflow=%s state=%s' "$workflow" || fail "workflow does not emit an exact signed-tag proof marker"
 grep -Fq 'trusted/scripts/verify-release-tag.sh' "$workflow" || fail "protected verifier does not enforce the repository-pinned tag signer"
 grep -Fq 'Git graft files are forbidden' "$root/scripts/verify-release-tag.sh" || fail "protected tag verifier does not reject graft ancestry overrides"
@@ -623,7 +625,6 @@ if grep -Eiq "$forbidden_policy_tools" \
   "$root/scripts/test-release-assets.sh" \
   "$root/scripts/test-release-local.sh" \
   "$root/.github/workflows/ci.yml" \
-  "$root/.github/workflows/release.yml" \
   "$root/.github/workflows/release-assets.yml" \
   "$root/README.md" \
   "$root/docs/releasing.md"; then
