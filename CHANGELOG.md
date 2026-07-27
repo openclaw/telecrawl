@@ -10,6 +10,10 @@
 
 - Add source-attributed tombstones to every canonical archive entity, propagate parent deletions to subordinate rows, and make account-bound backup pulls merge by default with exact replacement behind explicit `--restore`.
 
+### Dependencies
+
+- Update Go dependencies, including `go-faster/errors` v0.8.0, `klauspost/compress` v1.19.1, and `go-isatty` v0.0.24.
+
 ### Fixed
 
 - Harden release closeout against delayed GitHub asset digests, GoReleaser-added trailing note newlines, draft PATCH tag resets, and Homebrew versions that reject untapped formula files.
