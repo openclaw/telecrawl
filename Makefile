@@ -3,7 +3,7 @@
 BINARY ?= bin/telecrawl
 VERSION ?=
 
-.PHONY: help build test test-coverage test-race run fmt deps lint secrets check snapshot release-check release-pilot release-draft verify-release release release-homebrew
+.PHONY: help build test test-coverage test-race run fmt deps lint secrets check snapshot release-check release-pilot release-draft verify-release release release-artifacts release-homebrew
 
 help: ## Print available targets.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -63,21 +63,23 @@ snapshot: ## Build credential-free snapshot artifacts without publishing.
 release-check: ## Validate the local signing, packaging, and release contracts.
 	env -u GOTOOLCHAIN ./scripts/release-local --check
 
-release-pilot: ## Build and verify a notarized, unpublished pilot for VERSION=vX.Y.Z.
+release-pilot: ## Refuse the retired local pilot path and print the official CI command.
 	@test -n "$(VERSION)" || (echo "usage: make release-pilot VERSION=v0.3.5" >&2; exit 2)
 	./scripts/release-local pilot "$(VERSION)"
 
-release-draft: ## Build, sign, notarize, and upload the verified draft release.
+release-draft: ## Refuse the retired local draft path and print the official CI command.
 	./scripts/release-local draft
 
 verify-release: ## Verify draft artifacts natively for VERSION=vX.Y.Z.
 	@test -n "$(VERSION)" || (echo "usage: make verify-release VERSION=v0.3.5" >&2; exit 2)
 	./scripts/release-local verify-draft "$(VERSION)"
 
-release: ## Publish the natively verified draft for VERSION=vX.Y.Z.
+release: ## Refuse local publishing and print the official CI command.
 	@test -n "$(VERSION)" || (echo "usage: make release VERSION=v0.3.5" >&2; exit 2)
 	./scripts/release-local publish "$(VERSION)"
 
-release-homebrew: ## Verify the published release and update Homebrew.
+release-homebrew: ## Refuse the retired local Homebrew handoff and print the official CI command.
 	@test -n "$(VERSION)" || (echo "usage: make release-homebrew VERSION=v0.3.5" >&2; exit 2)
 	./scripts/release-local homebrew "$(VERSION)"
+
+release-artifacts: release ## Alias for release.
