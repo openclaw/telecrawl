@@ -28,9 +28,10 @@ import (
 )
 
 const (
-	telegramDesktopAPIID   = 2040
-	telegramDesktopAPIHash = "b18441a1ff607e10a989891a5462e627" // gitleaks:allow
-	tdataBatchSize         = 100
+	telegramDesktopAPIID    = 2040
+	telegramDesktopAPIHash  = "b18441a1ff607e10a989891a5462e627" // gitleaks:allow
+	tdataBatchSize          = 100
+	tdataForumTopicMaxPages = 1000
 )
 
 var errTDataStop = errors.New("stop tdata iteration")
@@ -136,7 +137,11 @@ func (s *tdataImportSession) importAccount(ctx context.Context) (ImportResult, e
 		result.Folders, result.FolderChats = s.loadFolders(ctx)
 	}
 	for _, row := range dialogRows {
-		result.Topics = append(result.Topics, s.loadTopics(ctx, row)...)
+		topics, err := s.loadTopics(ctx, row)
+		if err != nil {
+			return ImportResult{}, err
+		}
+		result.Topics = append(result.Topics, topics...)
 		messages, err := s.loadMessages(ctx, row)
 		if err != nil {
 			return ImportResult{}, err
@@ -595,20 +600,37 @@ func tdataDialogPeer(dialog tg.DialogClass) (tg.PeerClass, bool) {
 	return peer.GetPeer(), true
 }
 
-func (s *tdataImportSession) loadTopics(ctx context.Context, row tdataDialog) []store.Topic {
+type forumTopicsPager func(ctx context.Context, req *tg.MessagesGetForumTopicsRequest) (*tg.MessagesForumTopics, error)
+
+func (s *tdataImportSession) loadTopics(ctx context.Context, row tdataDialog) ([]store.Topic, error) {
 	if !row.forum {
-		return nil
+		return nil, nil
+	}
+	return collectForumTopics(ctx, row.chatID, 0, func(ctx context.Context, req *tg.MessagesGetForumTopicsRequest) (*tg.MessagesForumTopics, error) {
+		req.Peer = row.elem.Peer
+		return s.raw.MessagesGetForumTopics(ctx, req)
+	})
+}
+
+func collectForumTopics(ctx context.Context, chatJID string, maxPages int, page forumTopicsPager) ([]store.Topic, error) {
+	if maxPages <= 0 {
+		maxPages = tdataForumTopicMaxPages
 	}
 	var out []store.Topic
 	seen := make(map[int]struct{})
 	req := tg.MessagesGetForumTopicsRequest{
-		Peer:  row.elem.Peer,
 		Limit: tdataBatchSize,
 	}
-	for {
-		result, err := s.raw.MessagesGetForumTopics(ctx, &req)
-		if err != nil || result == nil || len(result.Topics) == 0 {
-			return out
+	for pages := 0; pages < maxPages; pages++ {
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
+		result, err := page(ctx, &req)
+		if err != nil {
+			return out, err
+		}
+		if result == nil || len(result.Topics) == 0 {
+			return out, nil
 		}
 		for _, rawTopic := range result.Topics {
 			topic, ok := rawTopic.(*tg.ForumTopic)
@@ -619,33 +641,59 @@ func (s *tdataImportSession) loadTopics(ctx context.Context, row tdataDialog) []
 				continue
 			}
 			seen[topic.ID] = struct{}{}
-			iconEmojiID := ""
-			if id, ok := topic.GetIconEmojiID(); ok {
-				iconEmojiID = strconv.FormatInt(id, 10)
-			}
-			out = append(out, store.Topic{
-				ChatJID:              row.chatID,
-				TopicID:              strconv.Itoa(topic.ID),
-				Title:                topic.Title,
-				TopMessageID:         strconv.Itoa(topic.TopMessage),
-				IconColor:            topic.IconColor,
-				IconEmojiID:          iconEmojiID,
-				UnreadCount:          topic.UnreadCount,
-				UnreadMentionsCount:  topic.UnreadMentionsCount,
-				UnreadReactionsCount: topic.UnreadReactionsCount,
-				Pinned:               topic.Pinned,
-				Closed:               topic.Closed,
-				Hidden:               topic.Hidden,
-				LastMessageAt:        unixTime(topic.Date),
-			})
+			out = append(out, storeForumTopic(chatJID, topic))
 		}
 		last, ok := result.Topics[len(result.Topics)-1].(*tg.ForumTopic)
 		if !ok || len(result.Topics) < tdataBatchSize {
-			return out
+			return out, nil
 		}
-		req.OffsetTopic = last.ID
-		req.OffsetID = last.TopMessage
-		req.OffsetDate = last.Date
+		nextTopic := last.ID
+		nextID := last.TopMessage
+		nextDate := forumTopicOffsetDate(result, last)
+		if nextTopic == req.OffsetTopic && nextID == req.OffsetID && nextDate == req.OffsetDate {
+			return out, nil
+		}
+		req.OffsetTopic = nextTopic
+		req.OffsetID = nextID
+		req.OffsetDate = nextDate
+	}
+	return out, nil
+}
+
+func forumTopicOffsetDate(result *tg.MessagesForumTopics, last *tg.ForumTopic) int {
+	if result.OrderByCreateDate {
+		return last.Date
+	}
+	for _, raw := range result.Messages {
+		if raw == nil || raw.GetID() != last.TopMessage {
+			continue
+		}
+		if msg, ok := raw.AsNotEmpty(); ok {
+			return msg.GetDate()
+		}
+	}
+	return last.Date
+}
+
+func storeForumTopic(chatJID string, topic *tg.ForumTopic) store.Topic {
+	iconEmojiID := ""
+	if id, ok := topic.GetIconEmojiID(); ok {
+		iconEmojiID = strconv.FormatInt(id, 10)
+	}
+	return store.Topic{
+		ChatJID:              chatJID,
+		TopicID:              strconv.Itoa(topic.ID),
+		Title:                topic.Title,
+		TopMessageID:         strconv.Itoa(topic.TopMessage),
+		IconColor:            topic.IconColor,
+		IconEmojiID:          iconEmojiID,
+		UnreadCount:          topic.UnreadCount,
+		UnreadMentionsCount:  topic.UnreadMentionsCount,
+		UnreadReactionsCount: topic.UnreadReactionsCount,
+		Pinned:               topic.Pinned,
+		Closed:               topic.Closed,
+		Hidden:               topic.Hidden,
+		LastMessageAt:        unixTime(topic.Date),
 	}
 }
 

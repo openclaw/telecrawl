@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Stop Telegram Desktop forum topic import from repeating the first `messages.getForumTopics` page when offsets do not advance.
+
 ## [0.3.5] - 2026-07-26
 
 ### Added
