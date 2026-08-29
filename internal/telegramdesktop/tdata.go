@@ -31,6 +31,7 @@ const (
 	telegramDesktopAPIID   = 2040
 	telegramDesktopAPIHash = "b18441a1ff607e10a989891a5462e627" // gitleaks:allow
 	tdataBatchSize         = 100
+	tdataFolderDialogMax   = 10000
 )
 
 var errTDataStop = errors.New("stop tdata iteration")
@@ -133,7 +134,10 @@ func (s *tdataImportSession) importAccount(ctx context.Context) (ImportResult, e
 
 	var result ImportResult
 	if strings.TrimSpace(s.opts.ChatID) == "" {
-		result.Folders, result.FolderChats = s.loadFolders(ctx)
+		result.Folders, result.FolderChats, err = s.loadFolders(ctx)
+		if err != nil {
+			return ImportResult{}, err
+		}
 	}
 	for _, row := range dialogRows {
 		result.Topics = append(result.Topics, s.loadTopics(ctx, row)...)
@@ -517,15 +521,44 @@ func tdataLargestPhotoThumbSize(photo *tg.Photo) string {
 	return bestType
 }
 
-func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, []store.FolderChat) {
-	result, err := s.raw.MessagesGetDialogFilters(ctx)
-	if err != nil || result == nil {
-		return nil, nil
+type dialogFiltersFetcher func(ctx context.Context) (*tg.MessagesDialogFilters, error)
+
+type folderDialogsWalker func(ctx context.Context, folderID int, visit func(ctx context.Context, elem dialogs.Elem) error) error
+
+func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, []store.FolderChat, error) {
+	return collectFolders(
+		ctx, s.selfID, s.opts.DialogsLimit,
+		func(ctx context.Context) (*tg.MessagesDialogFilters, error) {
+			return s.raw.MessagesGetDialogFilters(ctx)
+		},
+		func(ctx context.Context, folderID int, visit func(ctx context.Context, elem dialogs.Elem) error) error {
+			return query.GetDialogs(s.raw).FolderID(folderID).BatchSize(tdataBatchSize).ForEach(ctx, visit)
+		},
+	)
+}
+
+func collectFolders(ctx context.Context, selfID int64, dialogLimit int, fetch dialogFiltersFetcher, walk folderDialogsWalker) ([]store.Folder, []store.FolderChat, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	result, err := fetch(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if result == nil {
+		return nil, nil, nil
+	}
+	limit := dialogLimit
+	if limit <= 0 {
+		limit = tdataFolderDialogMax
 	}
 	memberships := make(map[string]map[string]struct{})
 	var folders []store.Folder
 	for _, filter := range result.GetFilters() {
-		folder, explicit := tdataFolder(filter, s.selfID)
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		folder, explicit := tdataFolder(filter, selfID)
 		if folder.ID == "" {
 			continue
 		}
@@ -540,13 +573,17 @@ func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, [
 				set[chatID] = struct{}{}
 			}
 		}
-		if id, err := strconv.Atoi(folder.ID); err == nil && id != 0 {
-			_ = query.GetDialogs(s.raw).FolderID(id).BatchSize(tdataBatchSize).ForEach(ctx, func(ctx context.Context, elem dialogs.Elem) error {
+		if id, convErr := strconv.Atoi(folder.ID); convErr == nil && id != 0 {
+			count := 0
+			walkErr := walk(ctx, id, func(ctx context.Context, elem dialogs.Elem) error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				peerID, ok := tdataDialogPeer(elem.Dialog)
 				if !ok {
 					return nil
 				}
-				chatID := tdataPeerIDString(peerID, s.selfID)
+				chatID := tdataPeerIDString(peerID, selfID)
 				if chatID == "" {
 					return nil
 				}
@@ -556,8 +593,18 @@ func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, [
 					memberships[folder.ID] = set
 				}
 				set[chatID] = struct{}{}
+				count++
+				if limit > 0 && count >= limit {
+					return errTDataStop
+				}
 				return nil
 			})
+			if errors.Is(walkErr, errTDataStop) {
+				walkErr = nil
+			}
+			if walkErr != nil {
+				return nil, nil, walkErr
+			}
 		}
 	}
 	var folderChats []store.FolderChat
@@ -584,7 +631,7 @@ func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, [
 		}
 		return numericStringLess(folderChats[i].FolderID, folderChats[j].FolderID)
 	})
-	return folders, folderChats
+	return folders, folderChats, nil
 }
 
 func tdataDialogPeer(dialog tg.DialogClass) (tg.PeerClass, bool) {

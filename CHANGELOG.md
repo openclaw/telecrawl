@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Surface Telegram Desktop folder import failures from `messages.getDialogFilters` and folder membership walks instead of finishing with missing folders.
+
 ## [0.3.5] - 2026-07-26
 
 ### Added
