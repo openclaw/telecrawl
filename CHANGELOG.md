@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Batch and cache existing media refs during `import --fetch-media` instead of loading every media row at once, up to three times.
+
 ## [0.3.5] - 2026-07-26
 
 ### Added

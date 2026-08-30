@@ -188,8 +188,9 @@ func (r *runtime) runImport(args []string) error {
 		defer func() { _ = os.RemoveAll(mediaStage) }()
 		var existingMediaSourcePath string
 		var existingMediaRefs []telegramdesktop.ExistingMediaRef
+		mediaCache := &mediaRefCache{}
 		if *fetchMedia && !restoreMode {
-			existingMediaSourcePath, existingMediaRefs, err = existingMediaRefsForImport(r.ctx, st)
+			existingMediaSourcePath, existingMediaRefs, err = existingMediaRefsForImport(r.ctx, st, mediaCache)
 			if err != nil {
 				return err
 			}
@@ -218,14 +219,14 @@ func (r *runtime) runImport(args []string) error {
 			}
 		}
 		if !restoreMode {
-			if err := preserveExistingMediaRefs(r.ctx, st, result.Stats.SourcePath, result.Messages, true); err != nil {
+			if err := preserveExistingMediaRefs(r.ctx, st, result.Stats.SourcePath, result.Messages, true, mediaCache); err != nil {
 				return err
 			}
 		}
 		if err := promoteImportMedia(&result, mediaStage, filepath.Join(filepath.Dir(st.Path()), "media")); err != nil {
 			return err
 		}
-		if err := storeImportResult(r.ctx, st, &result, *chat, restoreMode); err != nil {
+		if err := storeImportResultCached(r.ctx, st, &result, *chat, restoreMode, mediaCache); err != nil {
 			return err
 		}
 		return r.print(result.Stats)
@@ -233,11 +234,15 @@ func (r *runtime) runImport(args []string) error {
 }
 
 func storeImportResult(ctx context.Context, st *store.Store, result *telegramdesktop.ImportResult, chatFilter string, restore bool) error {
+	return storeImportResultCached(ctx, st, result, chatFilter, restore, nil)
+}
+
+func storeImportResultCached(ctx context.Context, st *store.Store, result *telegramdesktop.ImportResult, chatFilter string, restore bool, cache *mediaRefCache) error {
 	if err := prepareImportResultSource(result); err != nil {
 		return err
 	}
 	if !restore {
-		if err := preserveExistingMediaRefs(ctx, st, result.Stats.SourcePath, result.Messages, true); err != nil {
+		if err := preserveExistingMediaRefs(ctx, st, result.Stats.SourcePath, result.Messages, true, cache); err != nil {
 			return err
 		}
 	}
@@ -524,8 +529,32 @@ func refreshImportMediaStats(result *telegramdesktop.ImportResult) {
 	}
 }
 
-func existingMediaRefsForImport(ctx context.Context, st *store.Store) (string, []telegramdesktop.ExistingMediaRef, error) {
-	sourcePath, refsByPK, err := existingMediaRefs(ctx, st)
+type mediaRefCache struct {
+	loaded     bool
+	sourcePath string
+	refs       map[int64]telegramdesktop.ExistingMediaRef
+	loads      int
+}
+
+func (c *mediaRefCache) get(ctx context.Context, st *store.Store) (string, map[int64]telegramdesktop.ExistingMediaRef, error) {
+	if c != nil && c.loaded {
+		return c.sourcePath, c.refs, nil
+	}
+	sourcePath, refs, err := existingMediaRefs(ctx, st)
+	if err != nil {
+		return "", nil, err
+	}
+	if c != nil {
+		c.sourcePath = sourcePath
+		c.refs = refs
+		c.loaded = true
+		c.loads++
+	}
+	return sourcePath, refs, nil
+}
+
+func existingMediaRefsForImport(ctx context.Context, st *store.Store, cache *mediaRefCache) (string, []telegramdesktop.ExistingMediaRef, error) {
+	sourcePath, refsByPK, err := cache.get(ctx, st)
 	if err != nil || len(refsByPK) == 0 {
 		return sourcePath, nil, err
 	}
@@ -537,12 +566,12 @@ func existingMediaRefsForImport(ctx context.Context, st *store.Store) (string, [
 	return sourcePath, refs, nil
 }
 
-func preserveExistingMediaRefs(ctx context.Context, st *store.Store, sourcePath string, messages []store.Message, allowLegacySource bool) error {
+func preserveExistingMediaRefs(ctx context.Context, st *store.Store, sourcePath string, messages []store.Message, allowLegacySource bool, cache *mediaRefCache) error {
 	sourcePath = strings.TrimSpace(sourcePath)
 	if sourcePath == "" {
 		return nil
 	}
-	existingSourcePath, refs, err := existingMediaRefs(ctx, st)
+	existingSourcePath, refs, err := cache.get(ctx, st)
 	if err != nil || (!allowLegacySource && existingSourcePath != sourcePath) {
 		return err
 	}
@@ -578,7 +607,7 @@ func existingMediaRefs(ctx context.Context, st *store.Store) (string, map[int64]
 	if sourcePath == "" {
 		return "", nil, nil
 	}
-	existing, err := st.Messages(ctx, store.MessageFilter{HasMedia: true, Limit: int(^uint(0) >> 1)})
+	existing, err := st.MediaRefs(ctx)
 	if err != nil {
 		return "", nil, err
 	}

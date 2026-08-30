@@ -211,6 +211,16 @@ type MessageFilter struct {
 	Asc      bool
 }
 
+const mediaRefBatchSize = 500
+
+type MediaRef struct {
+	SourcePK   int64
+	MediaType  string
+	MediaTitle string
+	MediaPath  string
+	MediaSize  int64
+}
+
 func Open(ctx context.Context, path string) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("db path is required")
@@ -719,6 +729,51 @@ limit ?`, chatJID, limit)
 
 func (s *Store) Messages(ctx context.Context, filter MessageFilter) ([]Message, error) {
 	return s.messages(ctx, filter, false)
+}
+
+func (s *Store) MediaRefs(ctx context.Context) ([]MediaRef, error) {
+	return s.mediaRefs(ctx, mediaRefBatchSize)
+}
+
+func (s *Store) mediaRefs(ctx context.Context, batchSize int) ([]MediaRef, error) {
+	if batchSize <= 0 {
+		batchSize = mediaRefBatchSize
+	}
+	var out []MediaRef
+	var lastRowID int64
+	for {
+		rows, err := s.db.QueryContext(ctx, `select rowid,source_pk,coalesce(media_type,''),coalesce(media_title,''),coalesce(media_path,''),coalesce(media_size,0)
+			from messages
+			where deleted_at is null and media_type <> '' and rowid > ?
+			order by rowid limit ?`, lastRowID, batchSize)
+		if err != nil {
+			return nil, err
+		}
+		batch := make([]MediaRef, 0, batchSize)
+		var rowID int64
+		for rows.Next() {
+			var ref MediaRef
+			if err := rows.Scan(&rowID, &ref.SourcePK, &ref.MediaType, &ref.MediaTitle, &ref.MediaPath, &ref.MediaSize); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			batch = append(batch, ref)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if len(batch) == 0 {
+			return out, nil
+		}
+		out = append(out, batch...)
+		lastRowID = rowID
+		if len(batch) < batchSize {
+			return out, nil
+		}
+	}
 }
 
 func (s *Store) Search(ctx context.Context, filter MessageFilter) ([]Message, error) {
