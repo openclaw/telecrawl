@@ -1,6 +1,6 @@
 module github.com/openclaw/telecrawl
 
-go 1.26.5
+go 1.26.7
 
 require (
 	filippo.io/age v1.3.1
