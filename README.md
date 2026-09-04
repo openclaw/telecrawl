@@ -34,6 +34,8 @@ Or install with Go:
 go install github.com/openclaw/telecrawl/cmd/telecrawl@latest
 ```
 
+Source builds require Go 1.26.7 or newer; CI and Docker use Go 1.26.8.
+
 Maintainer release gates are documented in [docs/releasing.md](docs/releasing.md).
 
 ### Docker
