@@ -26,21 +26,21 @@ run: ## Run the CLI with optional ARGS.
 	GOWORK=off go run ./cmd/telecrawl $(ARGS)
 
 fmt: ## Check Go formatting with the CI-pinned gofumpt version.
-	@set -e; changed="$$(GOWORK=off go run mvdan.cc/gofumpt@v0.10.0 -l .)"; \
+	@set -e; changed="$$(GOWORK=off go run mvdan.cc/gofumpt@v0.11.0 -l .)"; \
 	if [ -n "$$changed" ]; then printf 'gofumpt wants changes in:\n%s\n' "$$changed"; exit 1; fi
 
 deps: ## Verify module metadata and known vulnerabilities.
 	GOWORK=off go mod verify
 	GOWORK=off go mod tidy
 	git diff --exit-code -- go.mod go.sum
-	GOWORK=off go run golang.org/x/vuln/cmd/govulncheck@v1.5.0 ./...
+	GOWORK=off go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
 lint: ## Run every static analyzer enforced by CI.
-	GOWORK=off go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
+	GOWORK=off go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 run
 	GOWORK=off go vet ./...
-	GOWORK=off go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
-	GOWORK=off go run golang.org/x/tools/cmd/deadcode@v0.48.0 ./cmd/telecrawl
-	GOWORK=off go run github.com/securego/gosec/v2/cmd/gosec@v2.27.1 -exclude=G101,G115,G202,G301,G304 ./...
+	GOWORK=off go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+	GOWORK=off go run golang.org/x/tools/cmd/deadcode@v0.49.0 ./cmd/telecrawl
+	GOWORK=off go run github.com/securego/gosec/v2/cmd/gosec@v2.29.0 -exclude=G101,G115,G202,G301,G304 ./...
 
 secrets: ## Scan Git history and the working tree with gitleaks.
 	GOWORK=off go run github.com/zricethezav/gitleaks/v8@v8.30.1 git --no-banner --redact

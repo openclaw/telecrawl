@@ -46,7 +46,7 @@ case "$mode" in
       actionlint .github/workflows/release-unified.yml
     else
       require_tools go
-      GOWORK=off go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 \
+      GOWORK=off go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 \
         .github/workflows/release-unified.yml
     fi
     grep -Fq 'uses: openclaw/release-workflows/.github/workflows/release-go-cli.yml@v1' \
