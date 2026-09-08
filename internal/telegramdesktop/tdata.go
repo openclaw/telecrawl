@@ -35,8 +35,9 @@ const (
 )
 
 var (
-	errTDataStop           = errors.New("stop tdata iteration")
-	errForumTopicPageLimit = errors.New("incomplete tdata import: forum topic page limit reached")
+	errTDataStop             = errors.New("stop tdata iteration")
+	errForumTopicPageLimit   = errors.New("incomplete tdata import: forum topic page limit reached")
+	errForumTopicsIncomplete = errors.New("incomplete tdata import: forum topics")
 )
 
 type forumTopicsPager func(context.Context, *tg.MessagesGetForumTopicsRequest) (*tg.MessagesForumTopics, error)
@@ -144,7 +145,7 @@ func (s *tdataImportSession) importAccount(ctx context.Context) (ImportResult, e
 	for _, row := range dialogRows {
 		topics, err := s.loadTopics(ctx, row)
 		if err != nil {
-			return ImportResult{}, err
+			return ImportResult{}, fmt.Errorf("load topics for chat %s: %w", row.chatID, err)
 		}
 		result.Topics = append(result.Topics, topics...)
 		messages, err := s.loadMessages(ctx, row)
@@ -621,6 +622,8 @@ func collectForumTopics(ctx context.Context, chatJID string, maxPages int, page 
 	}
 	var out []store.Topic
 	seen := make(map[int]struct{})
+	cursors := make(map[[3]int]struct{})
+	expected := 0
 	req := tg.MessagesGetForumTopicsRequest{
 		Limit: tdataBatchSize,
 	}
@@ -632,50 +635,59 @@ func collectForumTopics(ctx context.Context, chatJID string, maxPages int, page 
 		if err != nil {
 			return out, err
 		}
-		if result == nil || len(result.Topics) == 0 {
+		if result == nil {
+			return out, fmt.Errorf("%w: nil response", errForumTopicsIncomplete)
+		}
+		if result.Count > 0 {
+			expected = result.Count
+		}
+		// Counts can be approximate and nonterminal pages can be short.
+		if len(result.Topics) == 0 {
 			return out, nil
 		}
+		previous := len(out)
+		var last *tg.ForumTopic
 		for _, rawTopic := range result.Topics {
 			topic, ok := rawTopic.(*tg.ForumTopic)
-			if !ok || topic.ID == 0 {
+			if !ok || topic == nil || topic.ID == 0 {
 				continue
 			}
+			last = topic
 			if _, ok := seen[topic.ID]; ok {
 				continue
 			}
 			seen[topic.ID] = struct{}{}
 			out = append(out, storeForumTopic(chatJID, topic))
 		}
-		last, ok := result.Topics[len(result.Topics)-1].(*tg.ForumTopic)
-		if !ok || len(result.Topics) < tdataBatchSize {
+		// Like TDLib, skip deleted topics and stop if no usable topic remains.
+		if last == nil {
 			return out, nil
 		}
-		nextTopic := last.ID
-		nextID := last.TopMessage
-		nextDate := forumTopicOffsetDate(result, last)
-		if nextTopic == req.OffsetTopic && nextID == req.OffsetID && nextDate == req.OffsetDate {
-			return out, nil
+		nextDate, nextID := forumTopicOffsets(result, last)
+		cursor := [3]int{last.ID, nextID, nextDate}
+		if _, repeated := cursors[cursor]; repeated || len(out) == previous {
+			return out, fmt.Errorf("%w: pagination stalled after %d of %d topics", errForumTopicsIncomplete, len(out), expected)
 		}
-		req.OffsetTopic = nextTopic
-		req.OffsetID = nextID
-		req.OffsetDate = nextDate
+		cursors[cursor] = struct{}{}
+		req.OffsetTopic, req.OffsetID, req.OffsetDate = cursor[0], cursor[1], cursor[2]
 	}
 	return out, fmt.Errorf("%w: chat %s after %d pages (%d topics)", errForumTopicPageLimit, chatJID, maxPages, len(out))
 }
 
-func forumTopicOffsetDate(result *tg.MessagesForumTopics, last *tg.ForumTopic) int {
-	if result.OrderByCreateDate {
-		return last.Date
-	}
+func forumTopicOffsets(result *tg.MessagesForumTopics, last *tg.ForumTopic) (int, int) {
 	for _, raw := range result.Messages {
 		if raw == nil || raw.GetID() != last.TopMessage {
 			continue
 		}
 		if msg, ok := raw.AsNotEmpty(); ok {
-			return msg.GetDate()
+			if result.OrderByCreateDate {
+				return last.Date, last.TopMessage
+			}
+			return msg.GetDate(), last.TopMessage
 		}
 	}
-	return last.Date
+	// TDLib uses the creation date with no message offset when the top message is absent.
+	return last.Date, 0
 }
 
 func storeForumTopic(chatJID string, topic *tg.ForumTopic) store.Topic {

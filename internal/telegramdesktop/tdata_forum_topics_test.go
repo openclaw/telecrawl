@@ -11,7 +11,7 @@ import (
 	"github.com/gotd/td/tg"
 )
 
-func TestCollectForumTopicsStopsWhenOffsetsDoNotAdvance(t *testing.T) {
+func TestCollectForumTopicsStopsAtEmptyPage(t *testing.T) {
 	page := repeatedForumTopicPage(1000, 2000)
 	calls := 0
 	topics, err := collectForumTopics(context.Background(), "chat-1", 0, func(_ context.Context, _ *tg.MessagesGetForumTopicsRequest) (*tg.MessagesForumTopics, error) {
@@ -19,13 +19,16 @@ func TestCollectForumTopicsStopsWhenOffsetsDoNotAdvance(t *testing.T) {
 		if calls > 5 {
 			t.Fatalf("pager called %d times; forum topic paging did not stop on a repeated page", calls)
 		}
+		if calls == 2 {
+			return &tg.MessagesForumTopics{}, nil
+		}
 		return page, nil
 	})
 	if err != nil {
 		t.Fatalf("collectForumTopics: %v", err)
 	}
 	if calls != 2 {
-		t.Fatalf("pager calls = %d, want 2 (first page plus one repeated page)", calls)
+		t.Fatalf("pager calls = %d, want 2 (topic page plus terminal empty page)", calls)
 	}
 	if len(topics) != tdataBatchSize {
 		t.Fatalf("topics = %d, want %d unique topics", len(topics), tdataBatchSize)
@@ -37,12 +40,16 @@ func TestCollectForumTopicsStopsWhenOffsetsDoNotAdvance(t *testing.T) {
 
 func TestCollectForumTopicsPagesByTopMessageDate(t *testing.T) {
 	first := repeatedForumTopicPage(1000, 2000)
+	first.Count = 101
 	var secondReq tg.MessagesGetForumTopicsRequest
 	calls := 0
 	_, err := collectForumTopics(context.Background(), "chat-1", 0, func(_ context.Context, req *tg.MessagesGetForumTopicsRequest) (*tg.MessagesForumTopics, error) {
 		calls++
 		if calls == 1 {
 			return first, nil
+		}
+		if calls == 3 {
+			return &tg.MessagesForumTopics{}, nil
 		}
 		secondReq = *req
 		return &tg.MessagesForumTopics{
@@ -70,6 +77,7 @@ func TestCollectForumTopicsPagesByTopMessageDate(t *testing.T) {
 
 func TestCollectForumTopicsPagesByTopicDateWhenOrderedByCreateDate(t *testing.T) {
 	first := repeatedForumTopicPage(1000, 2000)
+	first.Count = 101
 	first.OrderByCreateDate = true
 	var secondReq tg.MessagesGetForumTopicsRequest
 	calls := 0
@@ -78,8 +86,11 @@ func TestCollectForumTopicsPagesByTopicDateWhenOrderedByCreateDate(t *testing.T)
 		if calls == 1 {
 			return first, nil
 		}
+		if calls == 3 {
+			return &tg.MessagesForumTopics{}, nil
+		}
 		secondReq = *req
-		return &tg.MessagesForumTopics{Topics: []tg.ForumTopicClass{
+		return &tg.MessagesForumTopics{OrderByCreateDate: true, Topics: []tg.ForumTopicClass{
 			&tg.ForumTopic{ID: 101, Date: 900, Title: "next", TopMessage: 1201},
 		}}, nil
 	})
