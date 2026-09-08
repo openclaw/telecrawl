@@ -347,7 +347,7 @@ func validateSnapshotInputs(ctx context.Context, cfg Config, manifest ckbackup.M
 }
 
 func scopeGit(ctx context.Context, repo string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...) // #nosec G204 -- internal callers supply fixed commands, Git-derived refs and literal pathspecs; no shell, operator-trusted Git config.
 	cmd.Dir = repo
 	var out boundedGitOutput
 	cmd.Stdout = &out
