@@ -159,7 +159,7 @@ func ValidateImportIdentity(ctx context.Context, path string) error {
 func requireAccountPeerID(peer string) error {
 	id, err := strconv.ParseInt(peer, 10, 64)
 	if err != nil || id <= 0 {
-		return errors.New("Postbox source lacks a verified account peer identity; archive unchanged; use a source with decodable authorized account state")
+		return errors.New("postbox source lacks a verified account peer identity; archive unchanged; use a source with decodable authorized account state")
 	}
 	return nil
 }

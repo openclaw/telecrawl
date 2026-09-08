@@ -22,7 +22,9 @@ func TestAuditOpenUsesLiteralFilename(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, err := st.db.ExecContext(ctx, "INSERT INTO sync_state(key,value,updated_at) VALUES('audit_uri','synthetic',1)"); err != nil {
-				st.Close()
+				if closeErr := st.Close(); closeErr != nil {
+					t.Errorf("close archive after failed write: %v", closeErr)
+				}
 				t.Fatal(err)
 			}
 			if err := st.Close(); err != nil {
@@ -35,7 +37,11 @@ func TestAuditOpenUsesLiteralFilename(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer st.Close()
+			defer func() {
+				if err := st.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
 			var value string
 			if err := st.db.QueryRowContext(ctx, "SELECT value FROM sync_state WHERE key='audit_uri'").Scan(&value); err != nil {
 				t.Fatal(err)
