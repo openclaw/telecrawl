@@ -2,10 +2,17 @@
 
 ## Unreleased
 
+**Highlights:** Telegram Desktop forum imports complete reliably and reject incomplete topic pages before changing the archive.
+
+### Fixed
+
+- Fix Telegram Desktop forum pagination to use the correct message date and reject stalled, incomplete, or failed topic fetches before archive writes. (#35; thanks @SebTardif)
+
 ### Dependencies
 
 - Update age to v1.3.2, SQLite to v1.58.0, CrawlKit to v0.14.7, and `golang.org/x/crypto` to v0.56.0, with compatible supporting dependency updates.
-- Build with Go 1.26.8 while retaining Go 1.26.7 source compatibility, and refresh CI analyzers, checkout patches, and the Dockerfile frontend to 1.27.
+- Refresh compression, OpenTelemetry, ogen, modernc libc, and Go support modules while preserving Go 1.26.7 source compatibility.
+- Build with Go 1.26.8, update the Go setup action to v7, and refresh CI analyzers, checkout patches, and the Dockerfile frontend to 1.27.
 
 ## [0.3.6] - 2026-08-31
 
