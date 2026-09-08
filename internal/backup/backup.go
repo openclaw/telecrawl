@@ -245,44 +245,20 @@ func writeSnapshot(ctx context.Context, cfg Config, data store.SnapshotData, old
 		{Table: "group_participants", CountKey: "participants", Path: "data/group_participants.jsonl.gz.age", Rows: data.Participants},
 		{Table: "topics", Path: "data/topics.jsonl.gz.age", Rows: data.Topics},
 	}...)
+	if len(data.Revisions) == 0 {
+		shards = append(shards, ckbackup.Shard{Table: "message_revisions", Path: "data/message_revisions/unknown/00.jsonl.gz.age", Rows: data.Revisions})
+	}
 	for _, shard := range messageRevisionShards(data.Revisions) {
 		shards = append(shards, ckbackup.Shard{Table: "message_revisions", Path: shard.path, Rows: shard.revisions})
+	}
+	if len(data.Messages) == 0 {
+		shards = append(shards, ckbackup.Shard{Table: "messages", Path: "data/messages/unknown/00.jsonl.gz.age", Rows: data.Messages})
 	}
 	for _, shard := range messageShards(data.Messages) {
 		shards = append(shards, ckbackup.Shard{Table: "messages", Path: shard.path, Rows: shard.messages})
 	}
-	sharedOld := toCrawlkitManifest(old)
-	if strings.TrimSpace(data.SourceIdentity) == "" {
-		delete(sharedOld.Counts, "archive_metadata")
-	}
-	if len(data.Messages) == 0 {
-		delete(sharedOld.Counts, "messages")
-	}
-	if len(data.Revisions) == 0 {
-		delete(sharedOld.Counts, "message_revisions")
-	}
-	manifest, err := ckbackup.WriteSnapshot(ctx, crawlkitConfig(cfg), shards, sharedOld)
+	manifest, err := ckbackup.WriteSnapshot(ctx, crawlkitConfig(cfg), shards, toCrawlkitManifest(old))
 	if err != nil {
-		return Manifest{}, err
-	}
-	manifest.Counts["contacts"] = len(data.Contacts)
-	if strings.TrimSpace(data.SourceIdentity) != "" {
-		manifest.Counts["archive_metadata"] = 1
-	} else {
-		delete(manifest.Counts, "archive_metadata")
-	}
-	manifest.Counts["chats"] = len(data.Chats)
-	manifest.Counts["folders"] = len(data.Folders)
-	manifest.Counts["folder_chats"] = len(data.FolderChats)
-	manifest.Counts["groups"] = len(data.Groups)
-	manifest.Counts["participants"] = len(data.Participants)
-	manifest.Counts["topics"] = len(data.Topics)
-	manifest.Counts["messages"] = len(data.Messages)
-	manifest.Counts["message_revisions"] = len(data.Revisions)
-	if ckbackup.EquivalentManifest(toCrawlkitManifest(old), manifest) {
-		return old, nil
-	}
-	if err := ckbackup.WriteManifest(cfg.Repo, manifest); err != nil {
 		return Manifest{}, err
 	}
 	return fromCrawlkitManifest(manifest), nil

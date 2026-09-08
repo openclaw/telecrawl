@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Publish explicit empty message and revision shards with final backup counts so empty snapshots and retries remain unchanged, without inventing account metadata.
 - Confine cached media reads to selected account/download roots and verified archived references; skip special files during bounded local probes.
 - Require a decoded native account peer identity before archive writes instead of treating a shared lane encryption key as account identity; retain historical key-bound archives unchanged.
 - Scope encrypted-backup Git commits to literal current and previous manifest artifacts, preserve unrelated staging, and reject backup/source/identity overlaps before writes.
