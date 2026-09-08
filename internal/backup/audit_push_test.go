@@ -1,13 +1,182 @@
 package backup
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestAuditBackupPreservesEstablishedOrigin(t *testing.T) {
+	for _, retry := range []bool{false, true} {
+		t.Run(fmt.Sprint("retry-", retry), func(t *testing.T) {
+			ctx := context.Background()
+			parent := t.TempDir()
+			remoteA, remoteB := filepath.Join(parent, "a.git"), filepath.Join(parent, "b.git")
+			runGit(t, parent, "init", "--bare", remoteA)
+			runGit(t, parent, "init", "--bare", remoteB)
+			opts := Options{
+				Repo: filepath.Join(parent, "repo"), Remote: remoteA,
+				Identity: filepath.Join(parent, "age.key"), ConfigPath: filepath.Join(parent, "backup.json"),
+			}
+			if _, _, err := Init(ctx, opts); err != nil {
+				t.Fatal(err)
+			}
+			st := openFixtureStore(t, "archive.db")
+			opts.Push = true
+			if retry {
+				hook := filepath.Join(remoteA, "hooks", "pre-receive")
+				if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := Push(ctx, st, opts); err == nil {
+					t.Fatal("expected remote refusal")
+				}
+				if err := os.Remove(hook); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(opts.Repo, "unrelated.txt"), []byte("staged sentinel"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, opts.Repo, "add", "unrelated.txt")
+			index := auditGitBytes(t, opts.Repo, "diff", "--cached", "--binary")
+			trace := filepath.Join(parent, "trace.log")
+			t.Setenv("GIT_TRACE", trace)
+			opts.Remote = remoteB
+			result, err := Push(ctx, st, opts)
+			t.Setenv("GIT_TRACE", "")
+			if err != nil || result.Changed == retry {
+				t.Fatalf("push retry=%v: %+v, %v", retry, result, err)
+			}
+			for _, args := range [][]string{{"remote", "get-url", "origin"}, {"remote", "get-url", "--push", "origin"}} {
+				if got := strings.TrimSpace(string(auditGitBytes(t, opts.Repo, args...))); got != remoteA {
+					t.Errorf("origin changed to %q", got)
+				}
+			}
+			if !bytes.Equal(index, auditGitBytes(t, opts.Repo, "diff", "--cached", "--binary")) {
+				t.Fatal("unrelated staged entry changed")
+			}
+			if !bytes.Equal(auditGitBytes(t, opts.Repo, "rev-parse", "HEAD"), auditGitBytes(t, remoteA, "rev-parse", "refs/heads/main")) {
+				t.Fatal("established remote did not receive local HEAD")
+			}
+			if refs := auditGitBytes(t, remoteB, "for-each-ref"); len(refs) != 0 {
+				t.Fatalf("stale configured remote received refs: %s", refs)
+			}
+			data, err := os.ReadFile(trace)
+			if err != nil || bytes.Contains(data, []byte(remoteB)) || !bytes.Contains(data, []byte("receive-pack")) {
+				t.Fatalf("unexpected Git transport trace: %s, %v", data, err)
+			}
+		})
+	}
+}
+
+func TestAuditBackupDoesNotAdoptMissingOrigin(t *testing.T) {
+	parent := t.TempDir()
+	remote := filepath.Join(parent, "remote.git")
+	runGit(t, parent, "init", "--bare", remote)
+	cfg := Config{Repo: filepath.Join(parent, "repo"), Remote: remote}
+	if err := ensureRepoForWrite(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, cfg.Repo, "remote", "remove", "origin")
+	if err := ensureRepoForWrite(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := auditGitBytes(t, cfg.Repo, "remote"); len(got) != 0 {
+		t.Fatalf("adopted missing origin: %s", got)
+	}
+}
+
+func auditGitBytes(t *testing.T, repo string, args ...string) []byte {
+	t.Helper()
+	out, err := scopeGit(context.Background(), repo, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestAuditBackupReleasedReadmeCompatibility(t *testing.T) {
+	const releasedHash = "f60bb7afabf37f2c739b7c139d647991ef64bba666f939c543250819add7daa6"
+	if fmt.Sprintf("%x", sha256.Sum256([]byte(legacyBackupReadme))) != releasedHash || len(legacyBackupReadme) != 3253 {
+		t.Fatal("legacy template differs from the released v0.3.7 constant")
+	}
+	for _, kind := range []string{"released", "one-byte", "trailing-text", "unsafe-ancestor"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			parent := t.TempDir()
+			remote := filepath.Join(parent, "remote.git")
+			runGit(t, parent, "init", "--bare", remote)
+			opts := Options{
+				Repo: filepath.Join(parent, "repo"), Remote: remote,
+				Identity: filepath.Join(parent, "age.key"), ConfigPath: filepath.Join(parent, "backup.json"),
+			}
+			if err := ensureRepo(ctx, Config{Repo: opts.Repo, Remote: remote}); err != nil {
+				t.Fatal(err)
+			}
+			body := legacyBackupReadme
+			switch kind {
+			case "one-byte":
+				body = "!" + body[1:]
+			case "trailing-text", "unsafe-ancestor":
+				body += "synthetic private note\n"
+			}
+			path := filepath.Join(opts.Repo, "README.md")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, opts.Repo, "add", "README.md")
+			runGit(t, opts.Repo, "commit", "-m", "test: released README init")
+			oldHead := strings.TrimSpace(string(auditGitBytes(t, opts.Repo, "rev-parse", "HEAD")))
+			if kind == "unsafe-ancestor" {
+				if err := os.WriteFile(path, []byte(legacyBackupReadme), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, opts.Repo, "add", "README.md")
+				runGit(t, opts.Repo, "commit", "-m", "test: restore exact released template")
+			}
+			if _, _, err := Init(ctx, opts); err != nil {
+				t.Fatal(err)
+			}
+			st := openFixtureStore(t, "archive.db")
+			if _, err := Push(ctx, st, opts); err != nil {
+				t.Fatal(err)
+			}
+			local := auditGitBytes(t, opts.Repo, "rev-parse", "HEAD")
+			opts.Push = true
+			result, err := Push(ctx, st, opts)
+			if kind != "released" {
+				if err == nil || !strings.Contains(err.Error(), "unverified unpublished") {
+					t.Fatalf("accepted altered historical README: %v", err)
+				}
+				if refs := auditGitBytes(t, remote, "for-each-ref"); len(refs) != 0 {
+					t.Fatalf("unsafe history published: %s", refs)
+				}
+				return
+			}
+			if err != nil || result.Changed {
+				t.Fatalf("unchanged released README retry: %+v, %v", result, err)
+			}
+			if !bytes.Equal(local, auditGitBytes(t, remote, "rev-parse", "refs/heads/main")) ||
+				!bytes.Equal(local, auditGitBytes(t, opts.Repo, "rev-parse", "HEAD")) {
+				t.Fatal("pending commit not published unchanged")
+			}
+			runGit(t, opts.Repo, "merge-base", "--is-ancestor", oldHead, "HEAD")
+			if got := auditGitBytes(t, opts.Repo, "show", oldHead+":README.md"); string(got) != legacyBackupReadme {
+				t.Fatal("historical README changed")
+			}
+			if got, err := os.ReadFile(path); err != nil || string(got) != legacyBackupReadme {
+				t.Fatalf("working README rewritten: %v", err)
+			}
+		})
+	}
+}
 
 func TestAuditBackupUnchangedRetryPublishesPendingCommit(t *testing.T) {
 	ctx := context.Background()

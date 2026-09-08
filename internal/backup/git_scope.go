@@ -264,7 +264,7 @@ func ownedPathspecs(ctx context.Context, cfg Config, manifests ...ckbackup.Manif
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
 				return nil, err
 			}
-			if string(content) != backupReadme {
+			if !ownedBackupReadme(content) {
 				continue
 			}
 		}

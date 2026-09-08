@@ -557,28 +557,6 @@ func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, [
 				set[chatID] = struct{}{}
 			}
 		}
-		if id, err := strconv.Atoi(folder.ID); err == nil && id != 0 {
-			err := query.GetDialogs(s.raw).FolderID(id).BatchSize(tdataBatchSize).ForEach(ctx, func(ctx context.Context, elem dialogs.Elem) error {
-				peerID, ok := tdataDialogPeer(elem.Dialog)
-				if !ok {
-					return nil
-				}
-				chatID := tdataPeerIDString(peerID, s.selfID)
-				if chatID == "" {
-					return nil
-				}
-				set := memberships[folder.ID]
-				if set == nil {
-					set = make(map[string]struct{})
-					memberships[folder.ID] = set
-				}
-				set[chatID] = struct{}{}
-				return nil
-			})
-			if err != nil {
-				return nil, nil, fmt.Errorf("load folder %s members: %w", folder.ID, err)
-			}
-		}
 	}
 	var folderChats []store.FolderChat
 	for folderID, chats := range memberships {

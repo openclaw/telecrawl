@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Preserve an existing backup checkout's origin when configuration names a different remote, including unchanged push retries.
+- Accept the exact static v0.3.7 backup README in owned files and pending history without rewriting it or accepting arbitrary README content.
+- Import custom dialog filters using their explicit pinned/included memberships, without passing filter IDs to the peer-folder API.
+
 - Publish explicit empty message and revision shards with final backup counts so empty snapshots and retries remain unchanged, without inventing account metadata.
 - Confine cached media reads to selected account/download roots and verified archived references; skip special files during bounded local probes.
 - Require a decoded native account peer identity before archive writes instead of treating a shared lane encryption key as account identity; retain historical key-bound archives unchanged.
@@ -13,7 +17,7 @@
 - Open archive filenames containing URI punctuation literally, preserving SQLite connection settings.
 - Abort native message extraction on malformed messages or embedded media instead of silently returning a partial import.
 - Bound native Postbox counts and nesting before allocating decoded collections.
-- Stop Telegram Desktop imports when folder or folder-membership queries fail.
+- Stop Telegram Desktop imports when dialog or filter queries fail.
 
 ## 0.3.7 - 2026-09-07
 
