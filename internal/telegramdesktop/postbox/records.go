@@ -186,6 +186,16 @@ func readSourceRecordsDB(ctx context.Context, source Source, db *sql.DB, multiAc
 	return Records{AccountPeerID: accountPeerID, Peers: peers, Contacts: contacts, Messages: messages}, nil
 }
 
+func ReadAccountPeerID(ctx context.Context, path string, key []byte) (string, error) {
+	db, cleanup, err := OpenDecryptedDB(ctx, path, key)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	defer func() { _ = db.Close() }()
+	return loadAccountPeerID(ctx, db)
+}
+
 func loadAccountPeerID(ctx context.Context, db *sql.DB) (string, error) {
 	var tableExists int
 	if err := db.QueryRowContext(ctx, `select exists(select 1 from sqlite_master where type='table' and name='t0')`).Scan(&tableExists); err != nil {
@@ -205,8 +215,16 @@ func loadAccountPeerID(ctx context.Context, db *sql.DB) (string, error) {
 	if err != nil {
 		return "", nil
 	}
-	peerID, ok := int64Value(decoded["peerId"])
-	if !ok || peerID == 0 {
+	var peerID int64
+	switch value := decoded["peerId"].(type) {
+	case int64:
+		peerID = value
+	case int32:
+		peerID = int64(value)
+	default:
+		return "", nil
+	}
+	if peerID <= 0 {
 		return "", nil
 	}
 	return strconv.FormatInt(peerID, 10), nil
@@ -232,7 +250,10 @@ func LoadMessageRecords(ctx context.Context, db *sql.DB, source Source, rawPeerR
 		if err := rows.Scan(&keyBlob, &value); err != nil {
 			return nil, err
 		}
-		record, ok := decodeMessageRecord(source, rawPeerRecords, rawPeers, mediaRoot, multiAccount, keyBlob, value)
+		record, ok, err := decodeMessageRecord(source, rawPeerRecords, rawPeers, mediaRoot, multiAccount, keyBlob, value)
+		if err != nil {
+			return nil, err
+		}
 		if ok {
 			messages = append(messages, record)
 		}
@@ -256,12 +277,12 @@ func loadSelectedMessageRecords(ctx context.Context, db *sql.DB, source Source, 
 	for _, key := range keys {
 		var value []byte
 		if err := stmt.QueryRowContext(ctx, key.raw).Scan(&value); err != nil {
-			if err == sql.ErrNoRows {
-				continue
-			}
 			return nil, err
 		}
-		record, ok := decodeMessageRecord(source, rawPeerRecords, rawPeers, mediaRoot, multiAccount, key.raw, value)
+		record, ok, err := decodeMessageRecord(source, rawPeerRecords, rawPeers, mediaRoot, multiAccount, key.raw, value)
+		if err != nil {
+			return nil, err
+		}
 		if ok {
 			messages = append(messages, record)
 		}
@@ -269,14 +290,17 @@ func loadSelectedMessageRecords(ctx context.Context, db *sql.DB, source Source, 
 	return messages, nil
 }
 
-func decodeMessageRecord(source Source, rawPeerRecords map[int64]PeerRecord, rawPeers map[int64]string, mediaRoot string, multiAccount bool, keyBlob []byte, value []byte) (MessageRecord, bool) {
+func decodeMessageRecord(source Source, rawPeerRecords map[int64]PeerRecord, rawPeers map[int64]string, mediaRoot string, multiAccount bool, keyBlob []byte, value []byte) (MessageRecord, bool, error) {
 	key, ok := parseMessageKey(source, multiAccount, keyBlob)
 	if !ok {
-		return MessageRecord{}, false
+		return MessageRecord{}, false, nil
 	}
 	msg, err := ReadMessage(value)
-	if err != nil || msg == nil {
-		return MessageRecord{}, false
+	if err != nil {
+		return MessageRecord{}, false, fmt.Errorf("decode message %d: %w", key.sourcePK, err)
+	}
+	if msg == nil {
+		return MessageRecord{}, false, nil
 	}
 	chatID := PeerStoreID(source.AccountID, key.peerID, multiAccount)
 	chatName := rawPeers[key.peerID]
@@ -312,7 +336,7 @@ func decodeMessageRecord(source Source, rawPeerRecords map[int64]PeerRecord, raw
 		MediaSize:          mediaSize,
 		EmbeddedMedia:      msg.EmbeddedMedia,
 		ReferencedMediaIDs: msg.ReferencedMediaIDs,
-	}, true
+	}, true, nil
 }
 
 type messageKey struct {

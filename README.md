@@ -92,6 +92,14 @@ proof because different accounts can share the same group or channel history.
 `--adopt-source` cannot override a different already-canonical source and cannot
 be combined with `--restore`.
 
+Native Postbox imports require a decodable authorized account peer ID. A shared
+lane encryption key is not account identity; missing or malformed account state
+now stops the import before archive writes. Existing archives bound by older
+versions to a key-derived identity are retained unchanged and cannot be
+automatically attributed or rebound. Keep those archives and their media; use a
+separate archive for verified imports until you have chosen an explicit operator
+migration or reimport procedure. `--adopt-source` does not override that binding.
+
 Canonical chats, folders and memberships, topics, contacts, groups and
 participants, and messages retain explicit Telegram tombstones with deletion
 time, source, and reason. Missing rows in a bounded import are not deletions.

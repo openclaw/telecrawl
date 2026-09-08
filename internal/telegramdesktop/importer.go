@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openclaw/telecrawl/internal/localfile"
 	"github.com/openclaw/telecrawl/internal/store"
 	postboxpkg "github.com/openclaw/telecrawl/internal/telegramdesktop/postbox"
 )
@@ -39,6 +40,7 @@ type ExistingMediaRef struct {
 }
 
 type ImportResult struct {
+	mediaRoots  []string
 	Stats       store.ImportStats
 	Contacts    []store.Contact
 	Chats       []store.Chat
@@ -56,6 +58,19 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 	}
 	source.path = canonicalPath
 	source.postbox = LooksLikePostbox(source.path)
+	archiveRoot := mediaArchiveDir(dbPath)
+	var verifiedRefs []ExistingMediaRef
+	if sameImportSourcePath(opts.ExistingMediaSourcePath, source.path) {
+		for _, ref := range opts.ExistingMediaRefs {
+			f, err := localfile.OpenRegular(archiveRoot, ref.MediaPath)
+			if err != nil {
+				continue
+			}
+			_ = f.Close()
+			verifiedRefs = append(verifiedRefs, ref)
+		}
+	}
+	opts.ExistingMediaRefs = verifiedRefs
 	var mediaTempDir string
 	if opts.FetchMedia {
 		mediaTempDir, err = os.MkdirTemp("", "telecrawl-telegram-media-*")
@@ -71,10 +86,14 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 		}
 		result.Stats.SourcePathCanonical = true
 		archiveDir := importMediaArchiveDir(opts, dbPath)
-		if err := copyImportedContactAvatars(result.Contacts, archiveDir); err != nil {
+		roots := append(result.mediaRoots, mediaTempDir)
+		if len(verifiedRefs) != 0 {
+			roots = append(roots, archiveRoot)
+		}
+		if err := copyImportedContactAvatars(result.Contacts, archiveDir, roots...); err != nil {
 			return ImportResult{}, err
 		}
-		if err := copyImportedMedia(result.Messages, archiveDir, &result.Stats); err != nil {
+		if err := copyImportedMedia(result.Messages, archiveDir, &result.Stats, roots...); err != nil {
 			return ImportResult{}, err
 		}
 		return result, nil
@@ -86,10 +105,14 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 	}
 	result.Stats.SourcePathCanonical = true
 	archiveDir := importMediaArchiveDir(opts, dbPath)
-	if err := copyImportedContactAvatars(result.Contacts, archiveDir); err != nil {
+	roots := []string{mediaTempDir}
+	if len(verifiedRefs) != 0 {
+		roots = append(roots, archiveRoot)
+	}
+	if err := copyImportedContactAvatars(result.Contacts, archiveDir, roots...); err != nil {
 		return ImportResult{}, err
 	}
-	if err := copyImportedMedia(result.Messages, archiveDir, &result.Stats); err != nil {
+	if err := copyImportedMedia(result.Messages, archiveDir, &result.Stats, roots...); err != nil {
 		return ImportResult{}, err
 	}
 	return result, nil
@@ -100,6 +123,45 @@ func importMediaArchiveDir(opts ImportOptions, dbPath string) string {
 		return path
 	}
 	return mediaArchiveDir(dbPath)
+}
+
+// ValidateImportIdentity checks native account evidence before the CLI opens an
+// archive for writing. Import checks the extracted identity again, so a changed
+// source cannot use this preflight result as an authorization token.
+func ValidateImportIdentity(ctx context.Context, path string) error {
+	source := resolveImportSource(strings.TrimSpace(path))
+	if !source.postbox {
+		return nil
+	}
+	sources, err := postboxpkg.DiscoverSources(source.path)
+	if err != nil {
+		return err
+	}
+	if len(sources) == 0 {
+		return errors.New("no Telegram for macOS Postbox account databases found")
+	}
+	for _, source := range sources {
+		key, err := postboxpkg.ReadTempKey(source.KeyPath, postboxpkg.DefaultPasscodes)
+		if err != nil {
+			return err
+		}
+		peer, err := postboxpkg.ReadAccountPeerID(ctx, source.DBPath, key)
+		if err != nil {
+			return err
+		}
+		if err := requireAccountPeerID(peer); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func requireAccountPeerID(peer string) error {
+	id, err := strconv.ParseInt(peer, 10, 64)
+	if err != nil || id <= 0 {
+		return errors.New("Postbox source lacks a verified account peer identity; archive unchanged; use a source with decodable authorized account state")
+	}
+	return nil
 }
 
 func importPostboxGo(ctx context.Context, sourcePath string, opts ImportOptions, dbPath, mediaTempDir string) (ImportResult, error) {
@@ -117,6 +179,10 @@ func importPostboxGo(ctx context.Context, sourcePath string, opts ImportOptions,
 	allContacts := make(map[string]store.Contact)
 	byIdentity := make(map[string]postboxpkg.MessageRecord)
 	for _, source := range sources {
+		mediaRoot := filepath.Join(filepath.Dir(filepath.Dir(source.DBPath)), "media")
+		if err := localfile.CheckDir(sourcePath, mediaRoot); err != nil && !os.IsNotExist(err) {
+			return ImportResult{}, err
+		}
 		key, err := postboxpkg.ReadTempKey(source.KeyPath, postboxpkg.DefaultPasscodes)
 		if err != nil {
 			return ImportResult{}, fmt.Errorf("read postbox tempkey %s: %w", source.KeyPath, err)
@@ -129,12 +195,10 @@ func importPostboxGo(ctx context.Context, sourcePath string, opts ImportOptions,
 		if err != nil {
 			return ImportResult{}, fmt.Errorf("read postbox records %s: %w", source.DBPath, err)
 		}
-		if records.AccountPeerID != "" {
-			accountIdentities = append(accountIdentities, "peer:"+records.AccountPeerID)
-		} else {
-			digest := sha256.Sum256(key)
-			accountIdentities = append(accountIdentities, fmt.Sprintf("database-key:%x", digest[:]))
+		if err := requireAccountPeerID(records.AccountPeerID); err != nil {
+			return ImportResult{}, err
 		}
+		accountIdentities = append(accountIdentities, "peer:"+records.AccountPeerID)
 		for id, display := range records.Peers {
 			allPeers[id] = display
 		}
@@ -196,6 +260,9 @@ func importPostboxGo(ctx context.Context, sourcePath string, opts ImportOptions,
 	})
 
 	result := ImportResult{Contacts: contacts}
+	for _, source := range sources {
+		result.mediaRoots = append(result.mediaRoots, filepath.Join(filepath.Dir(filepath.Dir(source.DBPath)), "media"))
+	}
 	chats := make(map[string]*store.Chat)
 	for _, msg := range messages {
 		if msg.MediaType != "" {
@@ -604,7 +671,7 @@ func mediaArchiveDir(dbPath string) string {
 	return filepath.Join(filepath.Dir(dbPath), "media")
 }
 
-func copyImportedMedia(messages []store.Message, archiveDir string, stats *store.ImportStats) error {
+func copyImportedMedia(messages []store.Message, archiveDir string, stats *store.ImportStats, roots ...string) error {
 	type archivedMedia struct {
 		path string
 		size int64
@@ -623,7 +690,7 @@ func copyImportedMedia(messages []store.Message, archiveDir string, stats *store
 				return err
 			}
 			if !alreadyArchived {
-				archivedPath, size, err = copyMediaFile(sourcePath, archiveDir)
+				archivedPath, size, err = copyMediaFile(sourcePath, archiveDir, roots...)
 			}
 			if err != nil {
 				if isMediaSourceUnavailable(err) {
@@ -655,7 +722,7 @@ func copyImportedMedia(messages []store.Message, archiveDir string, stats *store
 	return nil
 }
 
-func copyImportedContactAvatars(contacts []store.Contact, archiveDir string) error {
+func copyImportedContactAvatars(contacts []store.Contact, archiveDir string, roots ...string) error {
 	copiedSources := make(map[string]string)
 	for i := range contacts {
 		sourcePath := strings.TrimSpace(contacts[i].AvatarPath)
@@ -669,7 +736,7 @@ func copyImportedContactAvatars(contacts []store.Contact, archiveDir string) err
 				return err
 			}
 			if !alreadyArchived {
-				path, _, err = copyMediaFile(sourcePath, archiveDir)
+				path, _, err = copyMediaFile(sourcePath, archiveDir, roots...)
 			}
 			if err != nil {
 				if isMediaSourceUnavailable(err) {
@@ -688,6 +755,9 @@ func copyImportedContactAvatars(contacts []store.Contact, archiveDir string) err
 }
 
 func existingArchivedMedia(sourcePath, archiveDir string) (string, int64, bool, error) {
+	if filepath.Clean(sourcePath) != sourcePath {
+		return "", 0, false, errors.New("imported media path contains unresolved traversal")
+	}
 	sourceAbs, err := filepath.Abs(filepath.Clean(sourcePath))
 	if err != nil {
 		return "", 0, false, fmt.Errorf("resolve media source: %w", err)
@@ -700,12 +770,17 @@ func existingArchivedMedia(sourcePath, archiveDir string) (string, int64, bool, 
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
 		return "", 0, false, nil
 	}
-	info, err := os.Stat(sourceAbs)
-	if err != nil {
+	f, err := localfile.OpenRegular(archiveAbs, sourceAbs)
+	if os.IsNotExist(err) {
 		return "", 0, false, nil
 	}
-	if info.IsDir() {
-		return "", 0, false, mediaSourceUnavailableError{path: sourcePath, err: errors.New("is a directory")}
+	if err != nil {
+		return "", 0, false, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return "", 0, false, err
 	}
 	return sourceAbs, info.Size(), true, nil
 }
@@ -728,15 +803,15 @@ func isMediaSourceUnavailable(err error) bool {
 	return errors.As(err, &sourceErr)
 }
 
-func copyMediaFile(sourcePath, archiveDir string) (string, int64, error) {
+func copyMediaFile(sourcePath, archiveDir string, roots ...string) (string, int64, error) {
+	source, err := openMediaSource(sourcePath, roots)
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() { _ = source.Close() }()
 	if err := os.MkdirAll(archiveDir, 0o700); err != nil {
 		return "", 0, fmt.Errorf("mkdir media archive: %w", err)
 	}
-	source, err := os.Open(sourcePath)
-	if err != nil {
-		return "", 0, mediaSourceUnavailableError{path: sourcePath, err: err}
-	}
-	defer func() { _ = source.Close() }()
 
 	tmp, err := os.CreateTemp(archiveDir, ".media-*")
 	if err != nil {
@@ -776,6 +851,20 @@ func copyMediaFile(sourcePath, archiveDir string) (string, int64, error) {
 	}
 	removeTemp = false
 	return finalPath, size, nil
+}
+
+func openMediaSource(path string, roots []string) (*os.File, error) {
+	for _, root := range roots {
+		if root == "" || !localfile.Within(root, path) {
+			continue
+		}
+		f, err := localfile.OpenRegular(root, path)
+		if os.IsNotExist(err) {
+			return nil, mediaSourceUnavailableError{path: path, err: err}
+		}
+		return f, err
+	}
+	return nil, errors.New("imported media is outside the selected cache, download or verified archive roots")
 }
 
 func parseTime(value string) time.Time {

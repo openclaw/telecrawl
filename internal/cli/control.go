@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 
 	"github.com/openclaw/crawlkit/control"
+	"github.com/openclaw/telecrawl/internal/backup"
 )
 
 func controlManifest() control.Manifest {
@@ -11,7 +12,7 @@ func controlManifest() control.Manifest {
 	m.Description = "Local-first Telegram archive crawler."
 	m.Branding = control.Branding{SymbolName: "paperplane.fill", AccentColor: "#229ed9", BundleIdentifier: "org.telegram.desktop"}
 	m.Paths = control.Paths{
-		DefaultConfig:   filepath.Join(defaultBaseDir(), "backup.toml"),
+		DefaultConfig:   backup.DefaultConfigPath(),
 		DefaultDatabase: defaultDBPath(),
 		DefaultCache:    filepath.Join(defaultBaseDir(), "cache"),
 		DefaultLogs:     filepath.Join(defaultBaseDir(), "logs"),

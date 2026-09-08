@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -228,7 +230,10 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir db dir: %w", err)
 	}
-	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)", path)
+	dsn, err := sqliteFileDSN(path)
+	if err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -256,6 +261,29 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+func sqliteFileDSN(path string) (string, error) {
+	u := url.URL{Scheme: "file"}
+	if path == ":memory:" {
+		u.Opaque = path
+	} else {
+		absolutePath, err := filepath.Abs(path)
+		if err != nil {
+			return "", fmt.Errorf("resolve sqlite path: %w", err)
+		}
+		uriPath := filepath.ToSlash(absolutePath)
+		if runtime.GOOS == "windows" && filepath.VolumeName(absolutePath) != "" && !strings.HasPrefix(uriPath, "/") {
+			uriPath = "/" + uriPath
+		}
+		u.Path = uriPath
+	}
+	query := url.Values{}
+	for _, pragma := range []string{"foreign_keys(1)", "journal_mode(WAL)", "synchronous(NORMAL)", "busy_timeout(5000)"} {
+		query.Add("_pragma", pragma)
+	}
+	u.RawQuery = query.Encode()
+	return u.String(), nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }

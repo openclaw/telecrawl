@@ -140,7 +140,10 @@ func (s *tdataImportSession) importAccount(ctx context.Context) (ImportResult, e
 
 	var result ImportResult
 	if strings.TrimSpace(s.opts.ChatID) == "" {
-		result.Folders, result.FolderChats = s.loadFolders(ctx)
+		result.Folders, result.FolderChats, err = s.loadFolders(ctx)
+		if err != nil {
+			return ImportResult{}, err
+		}
 	}
 	for _, row := range dialogRows {
 		topics, err := s.loadTopics(ctx, row)
@@ -528,10 +531,13 @@ func tdataLargestPhotoThumbSize(photo *tg.Photo) string {
 	return bestType
 }
 
-func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, []store.FolderChat) {
+func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, []store.FolderChat, error) {
 	result, err := s.raw.MessagesGetDialogFilters(ctx)
-	if err != nil || result == nil {
-		return nil, nil
+	if err != nil {
+		return nil, nil, fmt.Errorf("load folders: %w", err)
+	}
+	if result == nil {
+		return nil, nil, errors.New("load folders: missing response")
 	}
 	memberships := make(map[string]map[string]struct{})
 	var folders []store.Folder
@@ -552,7 +558,7 @@ func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, [
 			}
 		}
 		if id, err := strconv.Atoi(folder.ID); err == nil && id != 0 {
-			_ = query.GetDialogs(s.raw).FolderID(id).BatchSize(tdataBatchSize).ForEach(ctx, func(ctx context.Context, elem dialogs.Elem) error {
+			err := query.GetDialogs(s.raw).FolderID(id).BatchSize(tdataBatchSize).ForEach(ctx, func(ctx context.Context, elem dialogs.Elem) error {
 				peerID, ok := tdataDialogPeer(elem.Dialog)
 				if !ok {
 					return nil
@@ -569,6 +575,9 @@ func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, [
 				set[chatID] = struct{}{}
 				return nil
 			})
+			if err != nil {
+				return nil, nil, fmt.Errorf("load folder %s members: %w", folder.ID, err)
+			}
 		}
 	}
 	var folderChats []store.FolderChat
@@ -595,7 +604,7 @@ func (s *tdataImportSession) loadFolders(ctx context.Context) ([]store.Folder, [
 		}
 		return numericStringLess(folderChats[i].FolderID, folderChats[j].FolderID)
 	})
-	return folders, folderChats
+	return folders, folderChats, nil
 }
 
 func tdataDialogPeer(dialog tg.DialogClass) (tg.PeerClass, bool) {

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/openclaw/telecrawl/internal/localfile"
 )
 
 const maxProbeBytes = 16
@@ -104,7 +106,10 @@ func Probe(ctx context.Context, opts Options) Report {
 			}
 			return nil
 		}
-		kind, ok := sniffFile(p)
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		kind, ok := sniffRootedFile(path, p)
 		if !ok {
 			return nil
 		}
@@ -200,12 +205,16 @@ func hasPostboxAccount(path string) bool {
 }
 
 func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func sniffFile(path string) (string, bool) {
-	f, err := os.Open(path)
+	return sniffRootedFile(filepath.Dir(path), path)
+}
+
+func sniffRootedFile(root, path string) (string, bool) {
+	f, err := localfile.OpenRegular(root, path)
 	if err != nil {
 		return "", false
 	}

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Fixed
+
+- Confine cached media reads to selected account/download roots and verified archived references; skip special files during bounded local probes.
+- Require a decoded native account peer identity before archive writes instead of treating a shared lane encryption key as account identity; retain historical key-bound archives unchanged.
+- Scope encrypted-backup Git commits to literal current and previous manifest artifacts, preserve unrelated staging, and reject backup/source/identity overlaps before writes.
+- Retry explicitly requested backup pushes even when unchanged, checking unpublished history first and refusing unverified paths without rewriting commits.
+- Advertise the actual JSON backup configuration path in control metadata.
+- Open archive filenames containing URI punctuation literally, preserving SQLite connection settings.
+- Abort native message extraction on malformed messages or embedded media instead of silently returning a partial import.
+- Bound native Postbox counts and nesting before allocating decoded collections.
+- Stop Telegram Desktop imports when folder or folder-membership queries fail.
+
 ## 0.3.7 - 2026-09-07
 
 **Highlights:** Telegram Desktop forum imports complete reliably and reject incomplete topic pages before changing the archive.
