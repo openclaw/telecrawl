@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.7 - 2026-09-07
 
 **Highlights:** Telegram Desktop forum imports complete reliably and reject incomplete topic pages before changing the archive.
 
