@@ -1,0 +1,69 @@
+// This fixture replaces only the session bootstrap in a temporary Go overlay.
+// The production account importer, pager, CLI and SQLite write paths stay intact.
+func importTDataGo(ctx context.Context, sourcePath string, opts ImportOptions, dbPath, mediaTempDir string) (ImportResult, error) {
+ ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+ defer cancel()
+ scenario := os.Getenv("TELECRAWL_PROOF_SCENARIO")
+ calls := 0
+ rpc := telegram.InvokeFunc(func(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
+  if err := ctx.Err(); err != nil { return err }
+  var response bin.Encoder
+  switch req := input.(type) {
+  case *tg.MessagesGetDialogsRequest:
+   response = &tg.MessagesDialogs{
+    Dialogs: []tg.DialogClass{&tg.Dialog{Peer: &tg.PeerChannel{ChannelID: 42}, TopMessage: 1100}},
+    Chats: []tg.ChatClass{&tg.Channel{ID: 42, AccessHash: 1, Title: "Synthetic forum", Forum: true, Photo: &tg.ChatPhotoEmpty{}}},
+    Messages: []tg.MessageClass{&tg.Message{ID: 1100, Date: 2000, PeerID: &tg.PeerChannel{ChannelID: 42}, Message: "synthetic sentinel"}},
+   }
+  case *tg.MessagesGetDialogFiltersRequest:
+   response = &tg.MessagesDialogFilters{}
+  case *tg.MessagesGetForumTopicsRequest:
+   calls++
+   if calls <= 3 { fmt.Fprintf(os.Stderr, "topic_rpc=%d offset=(%d,%d,%d)\n", calls, req.OffsetTopic, req.OffsetID, req.OffsetDate) }
+   if scenario == "rpc-error" && calls == 2 { return errors.New("synthetic forum RPC failure") }
+   page := &tg.MessagesForumTopics{Count: 400}
+   start, count := 1, 100
+   switch scenario {
+   case "success", "under-count", "over-count", "short-page", "missing-date", "deleted-boundary":
+    page.Count = 101
+    if scenario == "under-count" { page.Count = 50 }
+    if scenario == "over-count" { page.Count = 400 }
+    if scenario == "short-page" { count = 50 }
+    if calls == 2 {
+     expectedDate := 2000
+     if scenario == "missing-date" { expectedDate = 1000; if req.OffsetID != 0 { return errors.New("missing-message offset must be zero") } }
+     if req.OffsetDate != expectedDate { return errors.New("incorrect top-message pagination date") }
+     if scenario == "deleted-boundary" && req.OffsetTopic != 99 { return errors.New("deleted boundary topic used as cursor") }
+     start, count = 101, 1
+     if scenario == "short-page" { start, count = 51, 51 }
+     if scenario == "deleted-boundary" { count = 2 }
+    }
+    if calls >= 3 { count = 0 }
+   case "cycle":
+    if calls%2 == 0 { start = 101 }
+   }
+   for i := start; i < start+count; i++ {
+    page.Topics = append(page.Topics, &tg.ForumTopic{ID: i, Date: 1000, Title: fmt.Sprintf("Synthetic topic %d", i), TopMessage: 1000+i, Peer: &tg.PeerChannel{ChannelID: 42}, FromID: &tg.PeerUser{UserID: 1}})
+    if scenario != "missing-date" { page.Messages = append(page.Messages, &tg.Message{ID: 1000+i, Date: 2000, PeerID: &tg.PeerChannel{ChannelID: 42}}) }
+   }
+   if scenario == "deleted-boundary" && calls == 1 { page.Topics[len(page.Topics)-1] = &tg.ForumTopicDeleted{ID: 100} }
+   response = page
+  case *tg.MessagesGetHistoryRequest:
+   response = &tg.MessagesMessages{Messages: []tg.MessageClass{&tg.Message{ID: 1100, Date: 2000, PeerID: &tg.PeerChannel{ChannelID: 42}, Message: "synthetic sentinel"}}}
+  default:
+   return fmt.Errorf("unexpected fixture RPC %T", input)
+  }
+  var wire bin.Buffer
+  if err := response.Encode(&wire); err != nil { return err }
+  return output.Decode(&wire)
+ })
+ importer := &tdataImportSession{raw: tg.NewClient(rpc), selfID: 1, opts: opts, sourcePath: sourcePath}
+ result, err := importer.importAccount(ctx)
+ if err != nil { return ImportResult{}, err }
+ result.Stats.SourcePath = sourcePath
+ result.Stats.SourceIdentity = sourceIdentity("tdata", "1")
+ result.Stats.DBPath = dbPath
+ result.Stats.Chats, result.Stats.Messages = len(result.Chats), len(result.Messages)
+ result.Stats.StartedAt, result.Stats.FinishedAt = time.Now().UTC(), time.Now().UTC()
+ return result, nil
+}

@@ -28,12 +28,19 @@ import (
 )
 
 const (
-	telegramDesktopAPIID   = 2040
-	telegramDesktopAPIHash = "b18441a1ff607e10a989891a5462e627" // gitleaks:allow
-	tdataBatchSize         = 100
+	telegramDesktopAPIID    = 2040
+	telegramDesktopAPIHash  = "b18441a1ff607e10a989891a5462e627" // gitleaks:allow
+	tdataBatchSize          = 100
+	tdataForumTopicMaxPages = 1000
 )
 
-var errTDataStop = errors.New("stop tdata iteration")
+var (
+	errTDataStop             = errors.New("stop tdata iteration")
+	errForumTopicPageLimit   = errors.New("incomplete tdata import: forum topic page limit reached")
+	errForumTopicsIncomplete = errors.New("incomplete tdata import: forum topics")
+)
+
+type forumTopicsPager func(context.Context, *tg.MessagesGetForumTopicsRequest) (*tg.MessagesForumTopics, error)
 
 type tdataImportSession struct {
 	raw          *tg.Client
@@ -136,7 +143,11 @@ func (s *tdataImportSession) importAccount(ctx context.Context) (ImportResult, e
 		result.Folders, result.FolderChats = s.loadFolders(ctx)
 	}
 	for _, row := range dialogRows {
-		result.Topics = append(result.Topics, s.loadTopics(ctx, row)...)
+		topics, err := s.loadTopics(ctx, row)
+		if err != nil {
+			return ImportResult{}, fmt.Errorf("load topics for chat %s: %w", row.chatID, err)
+		}
+		result.Topics = append(result.Topics, topics...)
 		messages, err := s.loadMessages(ctx, row)
 		if err != nil {
 			return ImportResult{}, err
@@ -595,57 +606,109 @@ func tdataDialogPeer(dialog tg.DialogClass) (tg.PeerClass, bool) {
 	return peer.GetPeer(), true
 }
 
-func (s *tdataImportSession) loadTopics(ctx context.Context, row tdataDialog) []store.Topic {
+func (s *tdataImportSession) loadTopics(ctx context.Context, row tdataDialog) ([]store.Topic, error) {
 	if !row.forum {
-		return nil
+		return nil, nil
+	}
+	return collectForumTopics(ctx, row.chatID, 0, func(ctx context.Context, req *tg.MessagesGetForumTopicsRequest) (*tg.MessagesForumTopics, error) {
+		req.Peer = row.elem.Peer
+		return s.raw.MessagesGetForumTopics(ctx, req)
+	})
+}
+
+func collectForumTopics(ctx context.Context, chatJID string, maxPages int, page forumTopicsPager) ([]store.Topic, error) {
+	if maxPages <= 0 {
+		maxPages = tdataForumTopicMaxPages
 	}
 	var out []store.Topic
 	seen := make(map[int]struct{})
+	cursors := make(map[[3]int]struct{})
+	expected := 0
 	req := tg.MessagesGetForumTopicsRequest{
-		Peer:  row.elem.Peer,
 		Limit: tdataBatchSize,
 	}
-	for {
-		result, err := s.raw.MessagesGetForumTopics(ctx, &req)
-		if err != nil || result == nil || len(result.Topics) == 0 {
-			return out
+	for pages := 0; pages < maxPages; pages++ {
+		if err := ctx.Err(); err != nil {
+			return out, err
 		}
+		result, err := page(ctx, &req)
+		if err != nil {
+			return out, err
+		}
+		if result == nil {
+			return out, fmt.Errorf("%w: nil response", errForumTopicsIncomplete)
+		}
+		if result.Count > 0 {
+			expected = result.Count
+		}
+		// Counts can be approximate and nonterminal pages can be short.
+		if len(result.Topics) == 0 {
+			return out, nil
+		}
+		previous := len(out)
+		var last *tg.ForumTopic
 		for _, rawTopic := range result.Topics {
 			topic, ok := rawTopic.(*tg.ForumTopic)
-			if !ok || topic.ID == 0 {
+			if !ok || topic == nil || topic.ID == 0 {
 				continue
 			}
+			last = topic
 			if _, ok := seen[topic.ID]; ok {
 				continue
 			}
 			seen[topic.ID] = struct{}{}
-			iconEmojiID := ""
-			if id, ok := topic.GetIconEmojiID(); ok {
-				iconEmojiID = strconv.FormatInt(id, 10)
+			out = append(out, storeForumTopic(chatJID, topic))
+		}
+		// Like TDLib, skip deleted topics and stop if no usable topic remains.
+		if last == nil {
+			return out, nil
+		}
+		nextDate, nextID := forumTopicOffsets(result, last)
+		cursor := [3]int{last.ID, nextID, nextDate}
+		if _, repeated := cursors[cursor]; repeated || len(out) == previous {
+			return out, fmt.Errorf("%w: pagination stalled after %d of %d topics", errForumTopicsIncomplete, len(out), expected)
+		}
+		cursors[cursor] = struct{}{}
+		req.OffsetTopic, req.OffsetID, req.OffsetDate = cursor[0], cursor[1], cursor[2]
+	}
+	return out, fmt.Errorf("%w: chat %s after %d pages (%d topics)", errForumTopicPageLimit, chatJID, maxPages, len(out))
+}
+
+func forumTopicOffsets(result *tg.MessagesForumTopics, last *tg.ForumTopic) (int, int) {
+	for _, raw := range result.Messages {
+		if raw == nil || raw.GetID() != last.TopMessage {
+			continue
+		}
+		if msg, ok := raw.AsNotEmpty(); ok {
+			if result.OrderByCreateDate {
+				return last.Date, last.TopMessage
 			}
-			out = append(out, store.Topic{
-				ChatJID:              row.chatID,
-				TopicID:              strconv.Itoa(topic.ID),
-				Title:                topic.Title,
-				TopMessageID:         strconv.Itoa(topic.TopMessage),
-				IconColor:            topic.IconColor,
-				IconEmojiID:          iconEmojiID,
-				UnreadCount:          topic.UnreadCount,
-				UnreadMentionsCount:  topic.UnreadMentionsCount,
-				UnreadReactionsCount: topic.UnreadReactionsCount,
-				Pinned:               topic.Pinned,
-				Closed:               topic.Closed,
-				Hidden:               topic.Hidden,
-				LastMessageAt:        unixTime(topic.Date),
-			})
+			return msg.GetDate(), last.TopMessage
 		}
-		last, ok := result.Topics[len(result.Topics)-1].(*tg.ForumTopic)
-		if !ok || len(result.Topics) < tdataBatchSize {
-			return out
-		}
-		req.OffsetTopic = last.ID
-		req.OffsetID = last.TopMessage
-		req.OffsetDate = last.Date
+	}
+	// TDLib uses the creation date with no message offset when the top message is absent.
+	return last.Date, 0
+}
+
+func storeForumTopic(chatJID string, topic *tg.ForumTopic) store.Topic {
+	iconEmojiID := ""
+	if id, ok := topic.GetIconEmojiID(); ok {
+		iconEmojiID = strconv.FormatInt(id, 10)
+	}
+	return store.Topic{
+		ChatJID:              chatJID,
+		TopicID:              strconv.Itoa(topic.ID),
+		Title:                topic.Title,
+		TopMessageID:         strconv.Itoa(topic.TopMessage),
+		IconColor:            topic.IconColor,
+		IconEmojiID:          iconEmojiID,
+		UnreadCount:          topic.UnreadCount,
+		UnreadMentionsCount:  topic.UnreadMentionsCount,
+		UnreadReactionsCount: topic.UnreadReactionsCount,
+		Pinned:               topic.Pinned,
+		Closed:               topic.Closed,
+		Hidden:               topic.Hidden,
+		LastMessageAt:        unixTime(topic.Date),
 	}
 }
 

@@ -160,6 +160,11 @@ telecrawl search "query" --chat CHAT_ID --topic TOPIC_ID
 Telegram folders, forum topics, reply/thread IDs, pinned messages, edits,
 forwards, reactions, view/reply counts, and richer media titles are archived
 when the local source or Telegram API exposes them for the active account.
+Telegram Desktop forum pagination uses the last-message date (or creation date
+when Telegram explicitly selects that order). Incomplete, stalled, or failed
+topic fetches abort the import before archive rows are merged or replaced;
+reaching the 1,000-page safety bound also returns an error.
+
 Folder rows include explicit membership from Telegram dialog filters; dynamic
 folder rules are recorded as metadata and may not expand to every matching
 chat.
