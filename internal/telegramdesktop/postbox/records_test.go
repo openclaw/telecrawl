@@ -42,7 +42,7 @@ func TestLoadAccountPeerIDFromAuthorizedState(t *testing.T) {
 	}
 }
 
-func TestLoadAccountPeerIDAllowsUnsupportedStateFallback(t *testing.T) {
+func TestLoadAccountPeerIDLeavesUnsupportedStateUnverified(t *testing.T) {
 	t.Parallel()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -57,7 +57,7 @@ func TestLoadAccountPeerIDAllowsUnsupportedStateFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got != "" {
-		t.Fatalf("account peer id = %q, want database-key fallback", got)
+		t.Fatalf("account peer id = %q, want no verified identity", got)
 	}
 }
 

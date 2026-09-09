@@ -34,7 +34,10 @@ Or install with Go:
 go install github.com/openclaw/telecrawl/cmd/telecrawl@latest
 ```
 
-Source builds require Go 1.26.7 or newer; CI and Docker use Go 1.26.8.
+Source builds require Go 1.27.0 or newer (macOS 13 or newer on macOS).
+CI checks Go 1.27.0 separately; preferred builds and Docker use Go 1.27.1.
+This source-build requirement does not change the support claims of older
+released binaries.
 
 Maintainer release gates are documented in [docs/releasing.md](docs/releasing.md).
 
@@ -91,6 +94,14 @@ this archive without deleting rows. Message overlap is not treated as account
 proof because different accounts can share the same group or channel history.
 `--adopt-source` cannot override a different already-canonical source and cannot
 be combined with `--restore`.
+
+Native Postbox imports require a decodable authorized account peer ID. A shared
+lane encryption key is not account identity; missing or malformed account state
+now stops the import before archive writes. Existing archives bound by older
+versions to a key-derived identity are retained unchanged and cannot be
+automatically attributed or rebound. Keep those archives and their media; use a
+separate archive for verified imports until you have chosen an explicit operator
+migration or reimport procedure. `--adopt-source` does not override that binding.
 
 Canonical chats, folders and memberships, topics, contacts, groups and
 participants, and messages retain explicit Telegram tombstones with deletion

@@ -180,6 +180,9 @@ func (r *runtime) runImport(args []string) error {
 	if restoreMode && *adoptSource {
 		return usageErr(errors.New("--restore cannot be combined with --adopt-source"))
 	}
+	if err := telegramdesktop.ValidateImportIdentity(r.ctx, *path); err != nil {
+		return err
+	}
 	return r.withStore(func(st *store.Store) error {
 		mediaStage, err := os.MkdirTemp(filepath.Dir(st.Path()), ".telecrawl-import-media-*")
 		if err != nil {
@@ -1011,6 +1014,7 @@ func (r *runtime) backupInit(args []string) error {
 		return usageErr(err)
 	}
 	opts.Push = !*noPush
+	opts.ArchivePath, opts.SourcePath = r.dbPath, r.source
 	cfg, recipient, err := backup.Init(r.ctx, *opts)
 	if err != nil {
 		return err
@@ -1024,6 +1028,10 @@ func (r *runtime) backupPush(args []string) error {
 		return usageErr(err)
 	}
 	opts.Push = !*noPush
+	opts.ArchivePath, opts.SourcePath = r.dbPath, r.source
+	if err := backup.ValidateWriteOptions(*opts); err != nil {
+		return err
+	}
 	return r.withStore(func(st *store.Store) error {
 		result, err := backup.Push(r.ctx, st, *opts)
 		if err != nil {

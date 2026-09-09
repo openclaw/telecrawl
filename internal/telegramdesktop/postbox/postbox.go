@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/openclaw/telecrawl/internal/localfile"
 )
 
 const (
@@ -134,24 +136,18 @@ func ReadMessage(value []byte) (*Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	attrCount, err := reader.int32()
+	attrCount, err := reader.count(4)
 	if err != nil {
 		return nil, err
-	}
-	if attrCount < 0 {
-		return nil, fmt.Errorf("negative message attribute count")
 	}
 	for range int(attrCount) {
 		if _, err := reader.bytes(); err != nil {
 			return nil, err
 		}
 	}
-	embeddedCount, err := reader.int32()
+	embeddedCount, err := reader.count(4)
 	if err != nil {
 		return nil, err
-	}
-	if embeddedCount < 0 {
-		return nil, fmt.Errorf("negative embedded media count")
 	}
 	embeddedMedia := make([]any, 0, embeddedCount)
 	for range int(embeddedCount) {
@@ -160,16 +156,16 @@ func ReadMessage(value []byte) (*Message, error) {
 			return nil, err
 		}
 		decoded, err := DecodeObject(raw)
-		if err == nil && decoded != nil {
+		if err != nil {
+			return nil, fmt.Errorf("decode embedded media: %w", err)
+		}
+		if decoded != nil {
 			embeddedMedia = append(embeddedMedia, decoded)
 		}
 	}
-	refCount, err := reader.int32()
+	refCount, err := reader.count(12)
 	if err != nil {
 		return nil, err
-	}
-	if refCount < 0 {
-		return nil, fmt.Errorf("negative referenced media count")
 	}
 	refs := make([]MediaRef, 0, refCount)
 	for range int(refCount) {
@@ -434,13 +430,16 @@ func largestCacheCandidate(candidates []cacheCandidate) (string, int64) {
 }
 
 func cachedMediaPaths(resourceID, mediaRoot string) []string {
+	if resourceID == "" || resourceID == "." || resourceID == ".." || filepath.Base(resourceID) != resourceID {
+		return nil
+	}
 	var paths []string
 	exact := filepath.Join(mediaRoot, resourceID)
 	if isCompleteCacheFile(exact, resourceID) {
 		paths = append(paths, exact)
 	}
 	for _, path := range mediaCacheIndex(mediaRoot)[resourceID] {
-		if path != exact {
+		if path != exact && isCompleteCacheFile(path, resourceID) {
 			paths = append(paths, path)
 		}
 	}
@@ -454,7 +453,8 @@ func mediaCacheIndex(mediaRoot string) map[string][]string {
 		return index
 	}
 	for _, entry := range entries {
-		if entry.IsDir() {
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
 		name := entry.Name()
@@ -477,8 +477,12 @@ func isCompleteCacheFile(path, resourceID string) bool {
 	if strings.Contains(name, "_partial") || strings.HasSuffix(name, ".meta") {
 		return false
 	}
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
+	f, err := localfile.OpenRegular(filepath.Dir(path), path)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
 }
 
 func PeerStoreID(accountID string, peerID int64, multiAccount bool) string {

@@ -123,7 +123,7 @@ func TestCopyImportedMediaArchivesByContentHash(t *testing.T) {
 	var stats store.ImportStats
 	archiveDir := filepath.Join(t.TempDir(), "media")
 
-	if err := copyImportedMedia(messages, archiveDir, &stats); err != nil {
+	if err := copyImportedMedia(messages, archiveDir, &stats, filepath.Dir(source)); err != nil {
 		t.Fatal(err)
 	}
 	if messages[0].MediaPath == source {
@@ -159,11 +159,11 @@ func TestCopyImportedContactAvatarsArchivesByContentHash(t *testing.T) {
 	contacts := []store.Contact{
 		{JID: "1", AvatarPath: source},
 		{JID: "2", AvatarPath: source},
-		{JID: "3", AvatarPath: filepath.Join(t.TempDir(), "missing-avatar")},
+		{JID: "3", AvatarPath: filepath.Join(filepath.Dir(source), "missing-avatar")},
 	}
 	archiveDir := filepath.Join(t.TempDir(), "media")
 
-	if err := copyImportedContactAvatars(contacts, archiveDir); err != nil {
+	if err := copyImportedContactAvatars(contacts, archiveDir, filepath.Dir(source)); err != nil {
 		t.Fatal(err)
 	}
 	if contacts[0].AvatarPath == source {
@@ -221,7 +221,7 @@ func TestCopyImportedMediaSkipsMissingSourceCache(t *testing.T) {
 	}
 	var stats store.ImportStats
 
-	if err := copyImportedMedia(messages, filepath.Join(t.TempDir(), "media"), &stats); err != nil {
+	if err := copyImportedMedia(messages, filepath.Join(t.TempDir(), "media"), &stats, filepath.Dir(messages[0].MediaPath)); err != nil {
 		t.Fatal(err)
 	}
 	if messages[0].MediaPath != "" || messages[0].MediaSize != 0 {
@@ -414,7 +414,11 @@ func TestTDataReplyTopicMapping(t *testing.T) {
 func TestImportPassesExistingMediaRefsToPostboxImporter(t *testing.T) {
 	t.Parallel()
 	source, _, _ := makePostboxFixture(t)
-	media := filepath.Join(t.TempDir(), "already-archived")
+	dbPath := filepath.Join(t.TempDir(), "telecrawl.db")
+	media := filepath.Join(mediaArchiveDir(dbPath), "already-archived")
+	if err := os.MkdirAll(filepath.Dir(media), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(media, []byte("already archived"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +433,7 @@ func TestImportPassesExistingMediaRefsToPostboxImporter(t *testing.T) {
 			MediaPath: media,
 			MediaSize: int64(len("already archived")),
 		}},
-	}, filepath.Join(t.TempDir(), "telecrawl.db"))
+	}, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,6 +477,7 @@ func makePostboxFixture(t *testing.T) (root string, lane string, account string)
 	if err := copyFile(filepath.Join(dbDir, "db_sqlite"), fixtureDB); err != nil {
 		t.Fatal(err)
 	}
+	auditWriteAccountState(t, filepath.Join(dbDir, "db_sqlite"), auditAccountState(4242))
 	return root, lane, account
 }
 

@@ -9,6 +9,12 @@ import (
 
 const objectOrderKey = "\x00postbox_order"
 
+// Resource limits apply across nested objects, not independently per child.
+const (
+	maxDecodeDepth = 64
+	maxDecodeItems = 1 << 20
+)
+
 type byteReader struct {
 	data []byte
 	off  int
@@ -20,6 +26,17 @@ func newByteReader(data []byte) *byteReader {
 
 func (r *byteReader) remaining() int {
 	return len(r.data) - r.off
+}
+
+func (r *byteReader) count(minBytes int) (int32, error) {
+	count, err := r.int32()
+	if err != nil {
+		return 0, err
+	}
+	if count < 0 || int64(count) > int64(r.remaining()/minBytes) || count > maxDecodeItems {
+		return 0, errors.New("postbox count exceeds payload or resource limit")
+	}
+	return count, nil
 }
 
 func (r *byteReader) read(n int) ([]byte, error) {
@@ -141,18 +158,40 @@ type Entry struct {
 }
 
 func DecodeEntries(data []byte) ([]Entry, error) {
-	d := decoder{reader: newByteReader(data), size: len(data)}
+	items := maxDecodeItems
+	d := decoder{reader: newByteReader(data), size: len(data), items: &items}
 	return d.entries()
 }
 
 type decoder struct {
 	reader *byteReader
 	size   int
+	depth  int
+	items  *int
+}
+
+func (d decoder) claim(count int32) error {
+	if int64(count) > int64(*d.items) {
+		return errors.New("postbox item limit exceeded")
+	}
+	*d.items -= int(count)
+	return nil
+}
+
+func (d decoder) count(minBytes int) (int32, error) {
+	count, err := d.reader.count(minBytes)
+	if err != nil {
+		return 0, err
+	}
+	return count, d.claim(count)
 }
 
 func (d decoder) entries() ([]Entry, error) {
 	var entries []Entry
 	for d.reader.off < d.size {
+		if err := d.claim(1); err != nil {
+			return nil, err
+		}
 		key, err := d.reader.shortString()
 		if err != nil {
 			return nil, err
@@ -191,12 +230,9 @@ func (d decoder) value() (int, any, error) {
 		value, err := d.object()
 		return int(valueType), value, err
 	case 6:
-		count, err := d.reader.int32()
+		count, err := d.count(4)
 		if err != nil {
 			return int(valueType), nil, err
-		}
-		if count < 0 {
-			return int(valueType), nil, errors.New("negative int32 array length")
 		}
 		values := make([]any, 0, count)
 		for range int(count) {
@@ -208,12 +244,9 @@ func (d decoder) value() (int, any, error) {
 		}
 		return int(valueType), values, nil
 	case 7:
-		count, err := d.reader.int32()
+		count, err := d.count(8)
 		if err != nil {
 			return int(valueType), nil, err
-		}
-		if count < 0 {
-			return int(valueType), nil, errors.New("negative int64 array length")
 		}
 		values := make([]any, 0, count)
 		for range int(count) {
@@ -225,12 +258,9 @@ func (d decoder) value() (int, any, error) {
 		}
 		return int(valueType), values, nil
 	case 8:
-		count, err := d.reader.int32()
+		count, err := d.count(8)
 		if err != nil {
 			return int(valueType), nil, err
-		}
-		if count < 0 {
-			return int(valueType), nil, errors.New("negative object array length")
 		}
 		values := make([]any, 0, count)
 		for range int(count) {
@@ -242,12 +272,9 @@ func (d decoder) value() (int, any, error) {
 		}
 		return int(valueType), values, nil
 	case 9:
-		count, err := d.reader.int32()
+		count, err := d.count(16)
 		if err != nil {
 			return int(valueType), nil, err
-		}
-		if count < 0 {
-			return int(valueType), nil, errors.New("negative object pair array length")
 		}
 		values := make([]any, 0, count)
 		for range int(count) {
@@ -268,12 +295,9 @@ func (d decoder) value() (int, any, error) {
 	case 11:
 		return int(valueType), nil, nil
 	case 12:
-		count, err := d.reader.int32()
+		count, err := d.count(4)
 		if err != nil {
 			return int(valueType), nil, err
-		}
-		if count < 0 {
-			return int(valueType), nil, errors.New("negative string array length")
 		}
 		values := make([]any, 0, count)
 		for range int(count) {
@@ -285,12 +309,9 @@ func (d decoder) value() (int, any, error) {
 		}
 		return int(valueType), values, nil
 	case 13:
-		count, err := d.reader.int32()
+		count, err := d.count(4)
 		if err != nil {
 			return int(valueType), nil, err
-		}
-		if count < 0 {
-			return int(valueType), nil, errors.New("negative bytes array length")
 		}
 		values := make([]any, 0, count)
 		for range int(count) {
@@ -307,6 +328,9 @@ func (d decoder) value() (int, any, error) {
 }
 
 func (d decoder) object() (map[string]any, error) {
+	if d.depth >= maxDecodeDepth {
+		return nil, errors.New("postbox nesting limit exceeded")
+	}
 	typeHash, err := d.reader.int32()
 	if err != nil {
 		return nil, err
@@ -322,7 +346,8 @@ func (d decoder) object() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := DecodeEntries(data)
+	child := decoder{reader: newByteReader(data), size: len(data), depth: d.depth + 1, items: d.items}
+	entries, err := child.entries()
 	if err != nil {
 		return nil, err
 	}
