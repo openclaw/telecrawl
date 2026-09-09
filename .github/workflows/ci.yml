@@ -88,6 +88,14 @@ jobs:
   deps:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.27.0", "1.27.1"]
+    env:
+      GOTOOLCHAIN: local
+      GOWORK: "off"
+      GOFLAGS: "-p=1"
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -95,22 +103,44 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go }}
           cache: true
+
+      - name: Assert actual compiler
+        env:
+          EXPECTED_GO: ${{ matrix.go }}
+        run: |
+          go version
+          test "$(go env GOVERSION)" = "go${EXPECTED_GO}"
 
       - name: Verify module cache
         run: go mod verify
 
       - name: Check go.mod tidy
+        run: go mod tidy -diff
+
+      - name: Build and test the minimum toolchain
+        if: matrix.go == '1.27.0'
         run: |
-          go mod tidy
-          git diff --exit-code -- go.mod go.sum
+          go build -p=1 ./...
+          go test -count=1 -p=1 -timeout=120s ./...
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
 
       - name: Run govulncheck
-        run: '"$(go env GOPATH)/bin/govulncheck" ./...'
+        run: |
+          PATH="$(go env GOPATH)/bin:$PATH"
+          export PATH
+          bash scripts/check-vulnerabilities.sh "$RUNNER_TEMP/advisories"
+
+      - name: Retain advisory evidence
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: advisories-go${{ matrix.go }}
+          path: ${{ runner.temp }}/advisories
+          if-no-files-found: error
 
   release-check:
     runs-on: ubuntu-latest

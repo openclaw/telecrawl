@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Dependencies
+
+- Update CrawlKit to v0.15.0 for snapshot integrity and versioned encrypted backup generations, retaining gotd v0.161.0 and SQLite v1.58.0/libc v1.75.7.
+- Require Go 1.27.0 for source builds, prefer Go 1.27.1 in builds and Docker, and check the minimum toolchain and its advisories separately in CI. New macOS source builds require macOS 13 or newer.
+
 ### Fixed
 
 - Preserve an existing backup checkout's origin when configuration names a different remote, including unchanged push retries.
