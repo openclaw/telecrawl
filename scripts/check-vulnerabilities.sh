@@ -54,7 +54,7 @@ jq -e --arg compiler "$(go env GOVERSION)" --arg db "file://$db" \
   --slurpfile database "$db/index/db.json" '
   .[0].config as $config |
   $config.protocol_version == "v1.0.0" and
-  $config.scanner_name == "govulncheck" and $config.scanner_version == "v1.7.0" and
+  $config.scanner_name == "govulncheck" and $config.scanner_version == "v1.8.0" and
   $config.go_version == $compiler and $config.db == $db and
   $config.db_last_modified == $database[0].modified and
   $config.scan_mode == "source" and $config.scan_level == "symbol" and
