@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.4.0 - 2026-09-13
 
 **Highlights:** Safer Telegram imports and encrypted backups preserve archive data and account boundaries; source builds now require Go 1.27, and new macOS builds require macOS 13.
