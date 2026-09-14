@@ -1,32 +1,35 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-09-13
 
-### Dependencies
-
-- Compare canonical backup fixture paths in tests so the local gate works with macOS temporary-directory aliases.
-
-- Update CrawlKit to v0.16.3 and Go support modules, align SQLite v1.58.0 with its declared libc v1.75.6 dependency, and refresh pinned CI Actions and analyzers while retaining gotd v0.161.0 and the Go 1.27.0 minimum.
-
-- Update CrawlKit to v0.15.0 for snapshot integrity and versioned encrypted backup generations, retaining gotd v0.161.0 and SQLite v1.58.0/libc v1.75.7.
-- Require Go 1.27.0 for source builds, prefer Go 1.27.1 in builds and Docker, and check the minimum toolchain and its advisories separately in CI. New macOS source builds require macOS 13 or newer.
+**Highlights:** Safer Telegram imports and encrypted backups preserve archive data and account boundaries; source builds now require Go 1.27, and new macOS builds require macOS 13.
 
 ### Fixed
 
-- Preserve an existing backup checkout's origin when configuration names a different remote, including unchanged push retries.
-- Accept the exact static v0.3.7 backup README in owned files and pending history without rewriting it or accepting arbitrary README content.
-- Import custom dialog filters using their explicit pinned/included memberships, without passing filter IDs to the peer-folder API.
-
-- Publish explicit empty message and revision shards with final backup counts so empty snapshots and retries remain unchanged, without inventing account metadata.
-- Confine cached media reads to selected account/download roots and verified archived references; skip special files during bounded local probes.
-- Require a decoded native account peer identity before archive writes instead of treating a shared lane encryption key as account identity; retain historical key-bound archives unchanged.
-- Scope encrypted-backup Git commits to literal current and previous manifest artifacts, preserve unrelated staging, and reject backup/source/identity overlaps before writes.
-- Retry explicitly requested backup pushes even when unchanged, checking unpublished history first and refusing unverified paths without rewriting commits.
-- Advertise the actual JSON backup configuration path in control metadata.
-- Open archive filenames containing URI punctuation literally, preserving SQLite connection settings.
 - Abort native message extraction on malformed messages or embedded media instead of silently returning a partial import.
-- Bound native Postbox counts and nesting before allocating decoded collections.
 - Stop Telegram Desktop imports when dialog or filter queries fail.
+- Require a decoded native account peer identity before archive writes instead of treating a shared lane encryption key as account identity; retain historical key-bound archives unchanged.
+- Confine cached media reads to selected account/download roots and verified archived references; skip special files during bounded local probes.
+- Scope encrypted-backup Git commits to literal current and previous manifest artifacts, preserve unrelated staging, and reject backup/source/identity overlaps before writes.
+- Preserve an existing backup checkout's origin when configuration names a different remote, including unchanged push retries.
+- Retry explicitly requested backup pushes even when unchanged, checking unpublished history first and refusing unverified paths without rewriting commits.
+- Publish explicit empty message and revision shards with final backup counts so empty snapshots and retries remain unchanged, without inventing account metadata.
+- Import custom dialog filters using their explicit pinned/included memberships, without passing filter IDs to the peer-folder API.
+- Open archive filenames containing URI punctuation literally, preserving SQLite connection settings.
+- Bound native Postbox counts and nesting before allocating decoded collections.
+- Accept the exact static v0.3.7 backup README in owned files and pending history without rewriting it or accepting arbitrary README content.
+- Advertise the actual JSON backup configuration path in control metadata.
+
+### Changed
+
+- Require Go 1.27.0 for source builds, prefer Go 1.27.1 in builds and Docker, and check the minimum toolchain and its advisories separately in CI. New macOS source builds require macOS 13 or newer.
+- Require macOS 13 or newer for official macOS binaries.
+
+### Dependencies
+
+- Update CrawlKit to v0.16.3 and Go support modules, align SQLite v1.58.0 with its declared libc v1.75.6 dependency, and refresh pinned CI Actions and analyzers while retaining gotd v0.161.0 and the Go 1.27.0 minimum.
+- Update CrawlKit to v0.15.0 for snapshot integrity and versioned encrypted backup generations, retaining gotd v0.161.0 and SQLite v1.58.0/libc v1.75.7.
+- Compare canonical backup fixture paths in tests so the local gate works with macOS temporary-directory aliases.
 
 ## 0.3.7 - 2026-09-07
 

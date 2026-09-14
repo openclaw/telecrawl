@@ -20,13 +20,14 @@ It is local-first:
 ## Install
 
 ```bash
-brew tap steipete/tap
+brew tap openclaw/tap
 brew install telecrawl
 ```
 
-Official Homebrew macOS binaries are signed with the OpenClaw Foundation
-Developer ID and notarized by Apple before publication. Source builds and
-cross-platform snapshots remain credential-free.
+Official Homebrew macOS binaries require macOS 13 or newer as of Telecrawl 0.4.0.
+They are signed with the OpenClaw Foundation Developer ID and notarized by Apple
+before publication. Source builds and cross-platform snapshots remain
+credential-free.
 
 Or install with Go:
 

@@ -8,6 +8,7 @@ The public compatibility contract remains:
 - `telecrawl_VERSION_windows_{amd64,arm64}.zip`
 - `checksums.txt`
 - one Telecrawl executable and no documentation payloads inside each archive
+- macOS 13 or newer for official macOS binaries beginning with 0.4.0
 - OpenClaw Foundation Team ID `FWJYW4S8P8` and code identifier `ai.openclaw.telecrawl`
 
 The shared pipeline also publishes verifier control assets (`ASSET-INVENTORY.json`, `SIGNING-MANIFEST.json`, and `RELEASE-NOTES.md`). Its checksum manifest covers those controls in addition to the six archives.
