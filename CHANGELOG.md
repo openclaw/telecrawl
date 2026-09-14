@@ -4,6 +4,8 @@
 
 ### Dependencies
 
+- Compare canonical backup fixture paths in tests so the local gate works with macOS temporary-directory aliases.
+
 - Update CrawlKit to v0.16.3 and Go support modules, align SQLite v1.58.0 with its declared libc v1.75.6 dependency, and refresh pinned CI Actions and analyzers while retaining gotd v0.161.0 and the Go 1.27.0 minimum.
 
 - Update CrawlKit to v0.15.0 for snapshot integrity and versioned encrypted backup generations, retaining gotd v0.161.0 and SQLite v1.58.0/libc v1.75.7.

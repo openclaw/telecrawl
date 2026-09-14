@@ -44,7 +44,11 @@ func TestEncryptedBackupPushPull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Repo != repo || !strings.HasPrefix(recipient, "age1") {
+	canonicalRepo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Repo != canonicalRepo || !strings.HasPrefix(recipient, "age1") {
 		t.Fatalf("unexpected init cfg=%+v recipient=%q", cfg, recipient)
 	}
 	opts := Options{ConfigPath: configPath, Push: false}
@@ -66,7 +70,7 @@ func TestEncryptedBackupPushPull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if statusRepo != repo || status.Counts.Messages != 1 {
+	if statusRepo != canonicalRepo || status.Counts.Messages != 1 {
 		t.Fatalf("unexpected backup status repo=%s status=%+v", statusRepo, status)
 	}
 	manifest, err := readManifest(repo)
@@ -225,7 +229,11 @@ func TestHistoricalSnapshotRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshotsRepo != repo || len(snapshots) != 2 || snapshots[0].Ref != current || snapshots[1].Ref != initial {
+	canonicalRepo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshotsRepo != canonicalRepo || len(snapshots) != 2 || snapshots[0].Ref != current || snapshots[1].Ref != initial {
 		t.Fatalf("unexpected snapshots repo=%s snapshots=%+v", snapshotsRepo, snapshots)
 	}
 	restored := openFixtureStore(t, "restored.db")
