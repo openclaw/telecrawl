@@ -114,7 +114,7 @@ func TestSnapshotRoundTripPreservesTelegramStructure(t *testing.T) {
 	if err := restored.ImportSnapshot(ctx, exported, "backup", now); err != nil {
 		t.Fatal(err)
 	}
-	chats, err := restored.ChatsInFolder(ctx, "2", 10)
+	chats, err := restored.ChatsInFolder(ctx, "2", 10, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -558,7 +558,7 @@ func TestMergeAllPreservesHistoryOutsideImportWindow(t *testing.T) {
 		t.Fatalf("folders = %d, want 2", len(folders))
 	}
 
-	fcsA, err := st.ChatsInFolder(ctx, "1", 10)
+	fcsA, err := st.ChatsInFolder(ctx, "1", 10, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +566,7 @@ func TestMergeAllPreservesHistoryOutsideImportWindow(t *testing.T) {
 		t.Fatalf("folder 1 chats = %v, want not-seen membership preserved", fcsA)
 	}
 
-	fcs, err := st.ChatsInFolder(ctx, "2", 10)
+	fcs, err := st.ChatsInFolder(ctx, "2", 10, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -791,14 +791,14 @@ func TestMergeAllDoesNotInferFolderMembershipDeletion(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	oldFolder, err := st.ChatsInFolder(ctx, "1", 10)
+	oldFolder, err := st.ChatsInFolder(ctx, "1", 10, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(oldFolder) != 2 {
 		t.Fatalf("old folder chats = %#v, want both not-seen memberships preserved", oldFolder)
 	}
-	newFolder, err := st.ChatsInFolder(ctx, "2", 10)
+	newFolder, err := st.ChatsInFolder(ctx, "2", 10, false)
 	if err != nil {
 		t.Fatal(err)
 	}

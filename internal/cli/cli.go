@@ -693,7 +693,7 @@ func (r *runtime) runChats(args []string) error {
 	}
 	return r.withStore(func(st *store.Store) error {
 		if *folder != "" {
-			chats, err := st.ChatsInFolder(r.ctx, *folder, *limit)
+			chats, err := st.ChatsInFolder(r.ctx, *folder, *limit, *unread)
 			if err != nil {
 				return err
 			}
@@ -934,14 +934,22 @@ func (r *runtime) messageFilter(name string, args []string, requireQuery bool) (
 	fs.BoolVar(&filter.HasMedia, "media", false, "")
 	fs.BoolVar(&filter.Pinned, "pinned", false, "")
 	fs.BoolVar(&filter.Asc, "asc", false, "")
+	var query []string
+	// flag.Parse stops at the first positional argument; search also documents
+	// the query before its filters. Keep that query separate while parsing them.
+	if requireQuery && len(args) > 0 && (args[0] == "-" || !strings.HasPrefix(args[0], "-")) {
+		query = []string{args[0]}
+		args = args[1:]
+	}
 	if err := fs.Parse(args); err != nil {
 		return filter, usageErr(err)
 	}
 	if requireQuery {
-		if fs.NArg() != 1 {
+		query = append(query, fs.Args()...)
+		if len(query) != 1 {
 			return filter, usageErr(errors.New("search takes exactly one query"))
 		}
-		filter.Query = fs.Arg(0)
+		filter.Query = query[0]
 	} else if fs.NArg() != 0 {
 		return filter, usageErr(errors.New("messages takes flags only"))
 	}

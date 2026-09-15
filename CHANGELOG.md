@@ -5,6 +5,7 @@
 ### Fixed
 
 - Preserve SQLite's all-zero reserved locking page during native SQLCipher imports while continuing to authenticate data pages. (#39, #40; thanks @n0an for the report and @goutamadwant for the fix)
+- Accept search filters after the query as documented and apply `chats --unread` within folders before limiting results.
 
 ## 0.4.0 - 2026-09-13
 

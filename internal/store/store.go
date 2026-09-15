@@ -695,15 +695,16 @@ func (s *Store) ListFolders(ctx context.Context) ([]Folder, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) ChatsInFolder(ctx context.Context, folderID string, limit int) ([]Chat, error) {
+func (s *Store) ChatsInFolder(ctx context.Context, folderID string, limit int, unread bool) ([]Chat, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, `select cast(c.id as text),c.kind,coalesce(c.name,''),coalesce(c.username,''),coalesce(c.last_message_at,0),c.unread_count,c.message_count,coalesce(c.folder_id,''),c.forum
 from folder_chats fc join chats c on cast(c.id as text)=fc.chat_jid
 where fc.folder_id=? and fc.deleted_at is null and c.deleted_at is null
+and (? = 0 or c.unread_count > 0)
 order by fc.position asc, c.last_message_at desc
-limit ?`, folderID, limit)
+limit ?`, folderID, boolInt(unread), limit)
 	if err != nil {
 		return nil, err
 	}

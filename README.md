@@ -173,6 +173,7 @@ telecrawl folders
 telecrawl contacts
 telecrawl chats --limit 20
 telecrawl chats --folder FOLDER_ID
+telecrawl chats --folder FOLDER_ID --unread --limit 20
 telecrawl chats --unread
 telecrawl topics --chat CHAT_ID
 telecrawl messages --limit 20
@@ -182,6 +183,11 @@ telecrawl messages --chat CHAT_ID --pinned
 telecrawl search "query"
 telecrawl search "query" --chat CHAT_ID --topic TOPIC_ID
 ```
+
+Search filters can follow the query as shown above, or precede it. For a query
+beginning with a hyphen, put the filters first and use `--` before the query:
+`telecrawl search --chat CHAT_ID -- "-query"`. Folder and unread filters combine;
+the limit applies to matching unread chats within that folder.
 
 Telegram folders, forum topics, reply/thread IDs, pinned messages, edits,
 forwards, reactions, view/reply counts, and richer media titles are archived
