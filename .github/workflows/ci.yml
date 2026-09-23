@@ -35,7 +35,7 @@ jobs:
       - name: Install analyzers
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
-          go install mvdan.cc/gofumpt@v0.11.0
+          go install mvdan.cc/gofumpt@v0.12.0
           go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
           go install golang.org/x/tools/cmd/deadcode@v0.50.0
 

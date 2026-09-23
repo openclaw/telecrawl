@@ -26,7 +26,7 @@ run: ## Run the CLI with optional ARGS.
 	GOWORK=off go run ./cmd/telecrawl $(ARGS)
 
 fmt: ## Check Go formatting with the CI-pinned gofumpt version.
-	@set -e; changed="$$(GOWORK=off go run mvdan.cc/gofumpt@v0.11.0 -l .)"; \
+	@set -e; changed="$$(GOWORK=off go run mvdan.cc/gofumpt@v0.12.0 -l .)"; \
 	if [ -n "$$changed" ]; then printf 'gofumpt wants changes in:\n%s\n' "$$changed"; exit 1; fi
 
 deps: ## Verify module metadata and known vulnerabilities.
