@@ -128,12 +128,22 @@ func (r *runtime) withStore(fn func(*store.Store) error) error {
 	return fn(st)
 }
 
+func parseFlagsOnly(fs *flag.FlagSet, args []string) error {
+	if err := fs.Parse(args); err != nil {
+		return usageErr(err)
+	}
+	if fs.NArg() != 0 {
+		return usageErr(fmt.Errorf("%s takes flags only", strings.TrimPrefix(fs.Name(), "telecrawl ")))
+	}
+	return nil
+}
+
 func (r *runtime) runDoctor(args []string) error {
 	fs := flag.NewFlagSet("telecrawl doctor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	path := fs.String("path", r.source, "")
-	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+	if err := parseFlagsOnly(fs, args); err != nil {
+		return err
 	}
 	return r.printProbe(telegramdesktop.Probe(r.ctx, telegramdesktop.Options{Path: *path}))
 }
@@ -141,8 +151,8 @@ func (r *runtime) runDoctor(args []string) error {
 func (r *runtime) runStatus(args []string) error {
 	fs := flag.NewFlagSet("telecrawl status", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+	if err := parseFlagsOnly(fs, args); err != nil {
+		return err
 	}
 	return r.withStore(func(st *store.Store) error {
 		status, err := st.Status(r.ctx)
@@ -164,11 +174,8 @@ func (r *runtime) runImport(args []string) error {
 	restore := fs.Bool("restore", false, "")
 	replace := fs.Bool("replace", false, "") // Compatibility alias shipped in v0.3.4.
 	adoptSource := fs.Bool("adopt-source", false, "")
-	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
-	}
-	if fs.NArg() != 0 {
-		return usageErr(errors.New("import takes flags only"))
+	if err := parseFlagsOnly(fs, args); err != nil {
+		return err
 	}
 	if *restore && *replace {
 		return usageErr(errors.New("--restore and --replace are aliases; use only --restore"))
@@ -688,8 +695,8 @@ func (r *runtime) runChats(args []string) error {
 	limit := fs.Int("limit", 50, "")
 	unread := fs.Bool("unread", false, "")
 	folder := fs.String("folder", "", "")
-	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+	if err := parseFlagsOnly(fs, args); err != nil {
+		return err
 	}
 	return r.withStore(func(st *store.Store) error {
 		if *folder != "" {
@@ -710,11 +717,8 @@ func (r *runtime) runChats(args []string) error {
 func (r *runtime) runFolders(args []string) error {
 	fs := flag.NewFlagSet("telecrawl folders", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
-	}
-	if fs.NArg() != 0 {
-		return usageErr(errors.New("folders takes flags only"))
+	if err := parseFlagsOnly(fs, args); err != nil {
+		return err
 	}
 	return r.withStore(func(st *store.Store) error {
 		folders, err := st.ListFolders(r.ctx)
@@ -732,11 +736,8 @@ func (r *runtime) runContacts(args []string) error {
 	fs := flag.NewFlagSet("telecrawl contacts", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	limit := fs.Int("limit", 100, "")
-	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
-	}
-	if fs.NArg() != 0 {
-		return usageErr(errors.New("contacts takes flags only"))
+	if err := parseFlagsOnly(fs, args); err != nil {
+		return err
 	}
 	return r.withStore(func(st *store.Store) error {
 		contacts, err := st.ListContacts(r.ctx, *limit)
@@ -750,11 +751,8 @@ func (r *runtime) runContacts(args []string) error {
 func (r *runtime) runContactsExport(args []string) error {
 	fs := flag.NewFlagSet("telecrawl contacts export", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
-	}
-	if fs.NArg() != 0 {
-		return usageErr(errors.New("contacts export takes no arguments"))
+	if err := parseFlagsOnly(fs, args); err != nil {
+		return err
 	}
 	return r.withStore(func(st *store.Store) error {
 		contacts, err := st.ExportContacts(r.ctx)
@@ -876,11 +874,8 @@ func (r *runtime) runTopics(args []string) error {
 	fs.SetOutput(io.Discard)
 	chat := fs.String("chat", "", "")
 	limit := fs.Int("limit", 100, "")
-	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
-	}
-	if fs.NArg() != 0 {
-		return usageErr(errors.New("topics takes flags only"))
+	if err := parseFlagsOnly(fs, args); err != nil {
+		return err
 	}
 	return r.withStore(func(st *store.Store) error {
 		topics, err := st.ListTopics(r.ctx, *chat, *limit)
@@ -1018,8 +1013,8 @@ func backupFlags(name string) (*flag.FlagSet, *backup.Options, *bool) {
 
 func (r *runtime) backupInit(args []string) error {
 	fs, opts, noPush := backupFlags("telecrawl backup init")
-	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+	if err := parseFlagsOnly(fs, args); err != nil {
+		return err
 	}
 	opts.Push = !*noPush
 	opts.ArchivePath, opts.SourcePath = r.dbPath, r.source
@@ -1032,8 +1027,8 @@ func (r *runtime) backupInit(args []string) error {
 
 func (r *runtime) backupPush(args []string) error {
 	fs, opts, noPush := backupFlags("telecrawl backup push")
-	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+	if err := parseFlagsOnly(fs, args); err != nil {
+		return err
 	}
 	opts.Push = !*noPush
 	opts.ArchivePath, opts.SourcePath = r.dbPath, r.source
@@ -1052,11 +1047,8 @@ func (r *runtime) backupPush(args []string) error {
 func (r *runtime) backupPull(args []string) error {
 	fs, opts, _ := backupFlags("telecrawl backup pull")
 	fs.BoolVar(&opts.Restore, "restore", false, "")
-	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
-	}
-	if fs.NArg() != 0 {
-		return usageErr(errors.New("backup pull takes flags only"))
+	if err := parseFlagsOnly(fs, args); err != nil {
+		return err
 	}
 	if strings.TrimSpace(opts.Ref) != "" && !opts.Restore {
 		return usageErr(errors.New("backup pull --ref requires --restore because historical snapshots replace local rows"))
@@ -1072,8 +1064,8 @@ func (r *runtime) backupPull(args []string) error {
 
 func (r *runtime) backupStatus(args []string) error {
 	fs, opts, _ := backupFlags("telecrawl backup status")
-	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+	if err := parseFlagsOnly(fs, args); err != nil {
+		return err
 	}
 	manifest, repo, err := backup.Status(r.ctx, *opts)
 	if err != nil {
@@ -1084,11 +1076,8 @@ func (r *runtime) backupStatus(args []string) error {
 
 func (r *runtime) backupSnapshots(args []string) error {
 	fs, opts, _ := backupFlags("telecrawl backup snapshots")
-	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
-	}
-	if fs.NArg() != 0 {
-		return usageErr(errors.New("backup snapshots takes flags only"))
+	if err := parseFlagsOnly(fs, args); err != nil {
+		return err
 	}
 	if opts.Limit < 1 {
 		return usageErr(errors.New("backup snapshots --limit must be greater than zero"))

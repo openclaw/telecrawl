@@ -189,6 +189,10 @@ beginning with a hyphen, put the filters first and use `--` before the query:
 `telecrawl search --chat CHAT_ID -- "-query"`. Folder and unread filters combine;
 the limit applies to matching unread chats within that folder.
 
+Archive, import, and backup commands reject unexpected positional arguments
+before opening the archive or changing backup state. Use named flags for paths
+and filters; only `search` accepts a positional query.
+
 Telegram folders, forum topics, reply/thread IDs, pinned messages, edits,
 forwards, reactions, view/reply counts, and richer media titles are archived
 when the local source or Telegram API exposes them for the active account.
