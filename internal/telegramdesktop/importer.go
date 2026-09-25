@@ -20,11 +20,15 @@ import (
 )
 
 type ImportOptions struct {
-	Path                    string
-	DialogsLimit            int
-	MessagesLimit           int
-	ChatID                  string
-	FetchMedia              bool
+	Path          string
+	DialogsLimit  int
+	MessagesLimit int
+	ChatID        string
+	FetchMedia    bool
+	// FetchMediaMaxAge skips remote fetches for messages older than this; zero fetches any age.
+	FetchMediaMaxAge time.Duration
+	// FetchMediaMaxBytes skips remote fetches whose declared size exceeds this; zero fetches any size.
+	FetchMediaMaxBytes      int64
 	Progress                io.Writer
 	ExistingMediaSourcePath string
 	ExistingMediaRefs       []ExistingMediaRef

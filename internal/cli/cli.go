@@ -171,6 +171,8 @@ func (r *runtime) runImport(args []string) error {
 	messagesLimit := fs.Int("messages-limit", 500, "")
 	chat := fs.String("chat", "", "")
 	fetchMedia := fs.Bool("fetch-media", false, "")
+	fetchMediaMaxAge := fs.Duration("fetch-media-max-age", 0, "")
+	fetchMediaMaxMB := fs.Int64("fetch-media-max-mb", 0, "")
 	restore := fs.Bool("restore", false, "")
 	replace := fs.Bool("replace", false, "") // Compatibility alias shipped in v0.3.4.
 	adoptSource := fs.Bool("adopt-source", false, "")
@@ -211,6 +213,8 @@ func (r *runtime) runImport(args []string) error {
 			MessagesLimit:           *messagesLimit,
 			ChatID:                  *chat,
 			FetchMedia:              *fetchMedia,
+			FetchMediaMaxAge:        *fetchMediaMaxAge,
+			FetchMediaMaxBytes:      *fetchMediaMaxMB * 1024 * 1024,
 			Progress:                r.stderr,
 			ExistingMediaSourcePath: existingMediaSourcePath,
 			ExistingMediaRefs:       existingMediaRefs,
@@ -1239,7 +1243,7 @@ func printUsage(w io.Writer) {
 usage:
   telecrawl [--json] doctor [--path PATH]
   telecrawl [--json] metadata
-  telecrawl [--json] import [--path PATH] [--chat ID] [--dialogs-limit N] [--messages-limit N] [--fetch-media] [--adopt-source] [--restore]
+  telecrawl [--json] import [--path PATH] [--chat ID] [--dialogs-limit N] [--messages-limit N] [--fetch-media] [--fetch-media-max-age DURATION] [--fetch-media-max-mb N] [--adopt-source] [--restore]
   telecrawl [--json] status
   telecrawl [--json] folders
   telecrawl [--json] contacts [--limit N]
@@ -1255,7 +1259,7 @@ notes:
   import auto-detects Telegram Desktop tdata or native macOS Postbox data
   imports and backup pulls merge by default; --restore replaces the entire existing archive
   --adopt-source non-destructively records a verified legacy archive's current source
-  import archives local cached Postbox media by default; --fetch-media also tries Telegram cloud media
+  import archives local cached Postbox media by default; --fetch-media also tries Telegram cloud media, bounded by --fetch-media-max-age (for example 168h) and --fetch-media-max-mb when set
   backup writes encrypted age shards to a git repo
 `)
 }
