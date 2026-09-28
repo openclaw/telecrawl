@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Treat remote media without a file as unavailable instead of panicking during import. (#48; thanks @mbelinky)
+- Apply optional remote-media age and declared-size limits to both Telegram Desktop and native Postbox imports, including webpage attachments and progressive photos, while preserving message metadata and existing archived media.
+
 ## 0.4.1 - 2026-09-22
 
 **Highlights:** Large native SQLCipher imports preserve SQLite's reserved locking page, and CLI filters and backup arguments are handled reliably.

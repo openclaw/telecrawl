@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	querymessages "github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
@@ -426,6 +427,8 @@ func TestImportPassesExistingMediaRefsToPostboxImporter(t *testing.T) {
 	result, err := Import(context.Background(), ImportOptions{
 		Path:                    source,
 		FetchMedia:              true,
+		FetchMediaMaxAge:        time.Hour,
+		FetchMediaMaxBytes:      1,
 		ExistingMediaSourcePath: source,
 		ExistingMediaRefs: []ExistingMediaRef{{
 			SourcePK:  postboxpkg.SourcePK("stable/account-123", 100, 0, 1, false),

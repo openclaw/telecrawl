@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"sort"
 	"strings"
 
@@ -21,7 +20,7 @@ const (
 	telegramMacAPIHash = "3975f648bb682ee889f35483bc618d1c" // gitleaks:allow
 )
 
-func downloadPostboxRemoteMedia(ctx context.Context, messages []postboxpkg.MessageRecord, sources []postboxpkg.Source, mediaTempDir string, progress io.Writer) postboxRemoteMediaStats {
+func downloadPostboxRemoteMedia(ctx context.Context, messages []postboxpkg.MessageRecord, sources []postboxpkg.Source, mediaTempDir string, opts ImportOptions) postboxRemoteMediaStats {
 	sharePostboxDuplicateMedia(messages)
 	sharePostboxResourceMedia(messages)
 	candidates := postboxRemoteMediaCandidateIndexes(messages)
@@ -47,7 +46,7 @@ func downloadPostboxRemoteMedia(ctx context.Context, messages []postboxpkg.Messa
 		ordered := preferredPostboxSessions(accountID, sessions)
 		handled := false
 		for _, nativeSession := range ordered {
-			result, ok := downloadPostboxRemoteMediaForSession(ctx, nativeSession, messages, indexes, mediaTempDir, progress)
+			result, ok := downloadPostboxRemoteMediaForSession(ctx, nativeSession, messages, indexes, mediaTempDir, opts)
 			if !ok {
 				continue
 			}
@@ -109,7 +108,7 @@ func preferredPostboxSessions(accountID string, sessions map[string]*postboxpkg.
 	return ordered
 }
 
-func downloadPostboxRemoteMediaForSession(ctx context.Context, nativeSession *postboxpkg.NativeSession, messages []postboxpkg.MessageRecord, indexes []int, mediaTempDir string, progress io.Writer) (postboxRemoteMediaStats, bool) {
+func downloadPostboxRemoteMediaForSession(ctx context.Context, nativeSession *postboxpkg.NativeSession, messages []postboxpkg.MessageRecord, indexes []int, mediaTempDir string, opts ImportOptions) (postboxRemoteMediaStats, bool) {
 	storage, err := postboxSessionStorage(ctx, nativeSession)
 	if err != nil {
 		return postboxRemoteMediaStats{}, false
@@ -119,7 +118,7 @@ func downloadPostboxRemoteMediaForSession(ctx context.Context, nativeSession *po
 		SessionStorage: storage,
 		NoUpdates:      true,
 		AllowCDN:       true,
-		Middlewares:    []telegram.Middleware{newTelegramFloodWaitPolicy(progress)},
+		Middlewares:    []telegram.Middleware{newTelegramFloodWaitPolicy(opts.Progress)},
 		Device: telegram.DeviceConfig{
 			DeviceModel:    "Mac",
 			SystemVersion:  "macOS",
@@ -158,7 +157,7 @@ func downloadPostboxRemoteMediaForSession(ctx context.Context, nativeSession *po
 				stats.Unavailable++
 				continue
 			}
-			path, size, reason := downloadTelegramMessageMedia(ctx, raw, querymessages.Elem{Msg: remoteMessage}, mediaTempDir, fmt.Sprintf("%s:%d", nativeSession.AccountID, msg.SourcePK))
+			path, size, reason := downloadTelegramMessageMedia(ctx, raw, querymessages.Elem{Msg: remoteMessage}, mediaTempDir, fmt.Sprintf("%s:%d", nativeSession.AccountID, msg.SourcePK), opts)
 			if path != "" {
 				msg.MediaPath = path
 				msg.MediaSize = size
