@@ -4,8 +4,7 @@
 
 ### Fixed
 
-- Treat remote media without a file as unavailable instead of panicking during import. (#48; thanks @mbelinky)
-- Apply optional remote-media age and declared-size limits to both Telegram Desktop and native Postbox imports, including webpage attachments and progressive photos, while preserving message metadata and existing archived media.
+- Prevent fileless media from crashing imports and apply optional remote-media age and declared-size limits to Telegram Desktop and native Postbox, including webpage attachments and progressive photos, while preserving metadata and archived media. (#48) Thanks @mbelinky.
 
 ### Dependencies
 

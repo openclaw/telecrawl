@@ -68,6 +68,34 @@ func TestRemoteMediaFetchAllowedHonoursBounds(t *testing.T) {
 	}
 }
 
+func TestRemoteMediaFetchAllowedAtLimits(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	opts := ImportOptions{FetchMediaMaxAge: time.Hour, FetchMediaMaxBytes: 1024}
+	for _, tc := range []struct {
+		name    string
+		age     time.Duration
+		size    int64
+		allowed bool
+	}{
+		{"below both limits", time.Hour - time.Second, 1023, true},
+		{"exactly both limits", time.Hour, 1024, true},
+		{"one second too old", time.Hour + time.Second, 1024, false},
+		{"one byte too large", time.Hour, 1025, false},
+		{"unknown size at age limit", time.Hour, 0, true},
+		{"unknown size too old", time.Hour + time.Second, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			elem := querymessages.Elem{Msg: &tg.Message{
+				Date:  int(now.Add(-tc.age).Unix()),
+				Media: &tg.MessageMediaDocument{Document: &tg.Document{Size: tc.size}},
+			}}
+			if got := remoteMediaFetchAllowed(elem, opts, now); got != tc.allowed {
+				t.Fatalf("allowed = %v, want %v for age %s and size %d", got, tc.allowed, tc.age, tc.size)
+			}
+		})
+	}
+}
+
 func TestRemoteMediaFetchAllowedWebpageBounds(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	const limit = 20 << 20
