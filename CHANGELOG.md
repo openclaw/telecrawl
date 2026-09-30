@@ -10,6 +10,7 @@
 ### Dependencies
 
 - Update CrawlKit to v0.16.6.
+- Update SQLite to v1.60.1 with libc v1.77.1, Brotli to v1.2.6, compression to v1.20.1, and strftime to v1.1.0 while preserving the Go 1.27.0 minimum.
 
 ## 0.4.1 - 2026-09-22
 
