@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Dependencies
+
+- Update CrawlKit to v0.16.6.
+
 ## 0.4.1 - 2026-09-22
 
 **Highlights:** Large native SQLCipher imports preserve SQLite's reserved locking page, and CLI filters and backup arguments are handled reliably.
