@@ -428,11 +428,67 @@ func (s *tdataImportSession) senderInfo(msg tg.NotEmptyMessage, ents peer.Entiti
 }
 
 func (s *tdataImportSession) downloadMessageMedia(ctx context.Context, elem querymessages.Elem, chatID string) (string, int64, string) {
-	return downloadTelegramMessageMedia(ctx, s.raw, elem, s.mediaTempDir, fmt.Sprintf("%s:%d", chatID, elem.Msg.GetID()))
+	return downloadTelegramMessageMedia(ctx, s.raw, elem, s.mediaTempDir, fmt.Sprintf("%s:%d", chatID, elem.Msg.GetID()), s.opts)
 }
 
-func downloadTelegramMessageMedia(ctx context.Context, raw *tg.Client, elem querymessages.Elem, mediaTempDir, key string) (string, int64, string) {
-	if strings.TrimSpace(mediaTempDir) == "" {
+// remoteMediaFetchAllowed applies the optional --fetch-media bounds: a maximum
+// message age and a maximum declared file size. Unset bounds allow everything.
+func remoteMediaFetchAllowed(elem querymessages.Elem, opts ImportOptions, now time.Time) bool {
+	msg, ok := elem.Msg.(*tg.Message)
+	if !ok {
+		return true
+	}
+	if opts.FetchMediaMaxAge > 0 && now.Sub(time.Unix(int64(msg.Date), 0)) > opts.FetchMediaMaxAge {
+		return false
+	}
+	if opts.FetchMediaMaxBytes > 0 {
+		if size := telegramMessageMediaSize(msg); size > opts.FetchMediaMaxBytes {
+			return false
+		}
+	}
+	return true
+}
+
+// telegramMessageMediaSize follows the file resolver's document-before-photo
+// precedence, including webpage attachments. Undeclared sizes remain 0.
+func telegramMessageMediaSize(msg *tg.Message) int64 {
+	var document tg.DocumentClass
+	var photo tg.PhotoClass
+	switch media := msg.Media.(type) {
+	case *tg.MessageMediaDocument:
+		document = media.Document
+	case *tg.MessageMediaPhoto:
+		photo = media.Photo
+	case *tg.MessageMediaWebPage:
+		if page, ok := media.Webpage.(*tg.WebPage); ok && page != nil {
+			document, _ = page.GetDocument()
+			photo, _ = page.GetPhoto()
+		}
+	}
+	if doc, ok := document.(*tg.Document); ok && doc != nil {
+		return doc.Size
+	}
+	if photo, ok := photo.(*tg.Photo); ok && photo != nil {
+		var largest int64
+		for _, size := range photo.Sizes {
+			switch size := size.(type) {
+			case *tg.PhotoSize:
+				largest = max(largest, int64(size.Size))
+			case *tg.PhotoSizeProgressive:
+				for _, bytes := range size.Sizes {
+					largest = max(largest, int64(bytes))
+				}
+			case *tg.PhotoCachedSize:
+				largest = max(largest, int64(len(size.Bytes)))
+			}
+		}
+		return largest
+	}
+	return 0
+}
+
+func downloadTelegramMessageMedia(ctx context.Context, raw *tg.Client, elem querymessages.Elem, mediaTempDir, key string, opts ImportOptions) (string, int64, string) {
+	if strings.TrimSpace(mediaTempDir) == "" || !remoteMediaFetchAllowed(elem, opts, time.Now()) {
 		return "", 0, "unavailable"
 	}
 	file, ok := telegramMessageFile(elem)
@@ -465,23 +521,40 @@ func downloadTelegramMessageMedia(ctx context.Context, raw *tg.Client, elem quer
 }
 
 func telegramMessageFile(elem querymessages.Elem) (querymessages.File, bool) {
+	msg, ok := elem.Msg.(*tg.Message)
+	if !ok || msg == nil {
+		return querymessages.File{}, false
+	}
+	// gotd assumes document/photo payloads exist, even for expired media.
+	switch media := msg.Media.(type) {
+	case *tg.MessageMediaDocument:
+		if media == nil {
+			return querymessages.File{}, false
+		}
+		if doc, ok := media.Document.(*tg.Document); !ok || doc == nil {
+			return querymessages.File{}, false
+		}
+	case *tg.MessageMediaPhoto:
+		if media == nil {
+			return querymessages.File{}, false
+		}
+		if photo, ok := media.Photo.(*tg.Photo); !ok || photo == nil {
+			return querymessages.File{}, false
+		}
+	}
 	if file, ok := elem.File(); ok {
 		return file, true
 	}
-	msg, ok := elem.Msg.(*tg.Message)
-	if !ok {
-		return querymessages.File{}, false
-	}
 	media, ok := msg.Media.(*tg.MessageMediaWebPage)
-	if !ok {
+	if !ok || media == nil {
 		return querymessages.File{}, false
 	}
 	page, ok := media.Webpage.(*tg.WebPage)
-	if !ok {
+	if !ok || page == nil {
 		return querymessages.File{}, false
 	}
 	if rawDocument, ok := page.GetDocument(); ok {
-		if doc, ok := rawDocument.AsNotEmpty(); ok {
+		if doc, ok := rawDocument.(*tg.Document); ok && doc != nil {
 			return querymessages.File{
 				Name:     firstNonEmpty(tdataDocumentFilename(doc), tdataDocumentAudioTitle(doc), fmt.Sprintf("doc%d", doc.ID)),
 				MIMEType: doc.MimeType,
@@ -490,7 +563,7 @@ func telegramMessageFile(elem querymessages.Elem) (querymessages.File, bool) {
 		}
 	}
 	if rawPhoto, ok := page.GetPhoto(); ok {
-		if photo, ok := rawPhoto.AsNotEmpty(); ok {
+		if photo, ok := rawPhoto.(*tg.Photo); ok && photo != nil {
 			thumbSize := tdataLargestPhotoThumbSize(photo)
 			if thumbSize == "" {
 				return querymessages.File{}, false

@@ -133,6 +133,20 @@ locally:
 telecrawl import --dialogs-limit 0 --messages-limit 0 --fetch-media
 ```
 
+Limit cloud downloads by message age and declared file size:
+
+```bash
+telecrawl import --fetch-media --fetch-media-max-age 168h --fetch-media-max-mb 20
+```
+
+These optional limits apply to both Telegram Desktop and native Postbox imports,
+including webpage attachments. Age uses Go duration syntax (for example `168h`
+for seven days); size is in MiB (1,048,576 bytes). Both default to `0` for no
+limit and reject negative values. The size limit uses Telegram's declared size;
+attachments with unknown sizes remain eligible. Old Postbox messages are skipped
+before remote lookup. Skipped messages keep their metadata, and the limits do
+not remove existing archived media or prevent local cached-media imports.
+
 Remote media fetches are bounded best-effort operations. Import stats report how
 many remote media candidates were attempted, downloaded, still missing,
 unavailable, timed out, or errored.

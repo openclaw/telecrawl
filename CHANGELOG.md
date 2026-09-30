@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Treat remote media without a file as unavailable instead of panicking during import. (#48; thanks @mbelinky)
+- Apply optional remote-media age and declared-size limits to both Telegram Desktop and native Postbox imports, including webpage attachments and progressive photos, while preserving message metadata and existing archived media.
+
 ### Dependencies
 
 - Update CrawlKit to v0.16.6.

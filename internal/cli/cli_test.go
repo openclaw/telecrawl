@@ -825,3 +825,19 @@ func accountScopedImportResult(label string) telegramdesktop.ImportResult {
 		},
 	}
 }
+
+func TestImportRejectsInvalidMediaLimitsBeforeIO(t *testing.T) {
+	for _, args := range [][]string{
+		{"--fetch-media-max-age", "-1h"},
+		{"--fetch-media-max-mb", "-1"},
+		{"--fetch-media-max-mb", "8796093022208"},
+	} {
+		t.Run(strings.Join(args, "="), func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			err := Run(context.Background(), append([]string{"--source", filepath.Join(t.TempDir(), "absent"), "import", "--fetch-media"}, args...), &out, &errOut)
+			if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), args[0]) {
+				t.Fatalf("error = %v (exit %d), want media limit usage error", err, ExitCode(err))
+			}
+		})
+	}
+}
