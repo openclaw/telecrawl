@@ -70,8 +70,8 @@ github.com/ncruces/go-strftime v1.1.0 h1:vtPmPWMkb539RGV9WpWT9EwJGvrOCKvMNI4obWL
 github.com/ncruces/go-strftime v1.1.0/go.mod h1:yVaq7iwCN09vHRrKBrrflXT0M9tTMG2KmZ9Fj7xeG/g=
 github.com/ogen-go/ogen v1.24.0 h1:NehBG/8s0JeM6jYHPJeFJntBG3cE/xQgZd1q8BchPNM=
 github.com/ogen-go/ogen v1.24.0/go.mod h1:hcg4aTzLcu/MS1SGGahUriPBEOZB3c82RGIC6dYcdFU=
-github.com/openclaw/crawlkit v0.16.6 h1:Jq2hvcy0ugIkxd+GfNnMPryvYbIsONyg05rVMNbTLfU=
-github.com/openclaw/crawlkit v0.16.6/go.mod h1:XTGhBPNiMqKzPuKNwAH9ufbUU0Vel0pEQAZFqS/b7GQ=
+github.com/openclaw/crawlkit v0.16.7 h1:lMERtbGEVKyWKqdnIzlvYAU0gi3kqmy8wwTOON9jVSg=
+github.com/openclaw/crawlkit v0.16.7/go.mod h1:XTGhBPNiMqKzPuKNwAH9ufbUU0Vel0pEQAZFqS/b7GQ=
 github.com/pkg/diff v0.0.0-20210226163009-20ebb0f2a09e/go.mod h1:pJLUxLENpZxwdsKMEsNbx1VGcRFpLqf3715MtcvvzbA=
 github.com/refraction-networking/utls v1.8.2 h1:j4Q1gJj0xngdeH+Ox/qND11aEfhpgoEvV+S9iJ2IdQo=
 github.com/refraction-networking/utls v1.8.2/go.mod h1:jkSOEkLqn+S/jtpEHPOsVv/4V4EVnelwbMQl4vCWXAM=
