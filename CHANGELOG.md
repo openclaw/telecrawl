@@ -2,11 +2,14 @@
 
 ## Unreleased
 
+## 0.5.0 - 2026-09-30
+
+**Highlights:** Optional remote-media age and size limits keep imports manageable, while native Postbox imports scan the media cache only once.
+
 ### Fixed
 
-- Scan the native Postbox media cache once per import instead of once per avatar or attachment. (#52) Thanks @SebTardif.
-
 - Prevent fileless media from crashing imports and apply optional remote-media age and declared-size limits to Telegram Desktop and native Postbox, including webpage attachments and progressive photos, while preserving metadata and archived media. (#48) Thanks @mbelinky.
+- Scan the native Postbox media cache once per import instead of once per avatar or attachment. (#52) Thanks @SebTardif.
 
 ### Dependencies
 
