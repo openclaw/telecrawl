@@ -17,10 +17,10 @@ func TestAuditCacheExcludesEscapingExactAndIndexedLinks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := cachedMediaPaths("resource", root); len(got) != 0 {
+	if got := cachedMediaPaths("resource", root, nil); len(got) != 0 {
 		t.Fatalf("cache accepted symlinks: %v", got)
 	}
-	if got := cachedMediaPaths("../private", root); len(got) != 0 {
+	if got := cachedMediaPaths("../private", root, nil); len(got) != 0 {
 		t.Fatalf("cache accepted traversal: %v", got)
 	}
 }

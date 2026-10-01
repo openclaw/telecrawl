@@ -382,10 +382,17 @@ func mediaResourceID(resourceType int64, item map[string]any) string {
 }
 
 func CachedMediaFor(msg *Message, mediaRoot string) (string, int64) {
+	return cachedMediaFor(msg, mediaRoot, nil)
+}
+
+func cachedMediaFor(msg *Message, mediaRoot string, index map[string][]string) (string, int64) {
+	if index == nil {
+		index = mediaCacheIndex(mediaRoot)
+	}
 	var candidates []cacheCandidate
 	for _, item := range msg.EmbeddedMedia {
 		for _, resourceID := range MediaResourceIDs(item) {
-			for _, path := range cachedMediaPaths(resourceID, mediaRoot) {
+			for _, path := range cachedMediaPaths(resourceID, mediaRoot, index) {
 				if info, err := os.Stat(path); err == nil && !info.IsDir() {
 					candidates = append(candidates, cacheCandidate{path: path, size: info.Size()})
 				}
@@ -396,11 +403,18 @@ func CachedMediaFor(msg *Message, mediaRoot string) (string, int64) {
 }
 
 func CachedPeerAvatarPath(peer map[string]any, mediaRoot string) string {
+	return cachedPeerAvatarPath(peer, mediaRoot, nil)
+}
+
+func cachedPeerAvatarPath(peer map[string]any, mediaRoot string, index map[string][]string) string {
+	if index == nil {
+		index = mediaCacheIndex(mediaRoot)
+	}
 	photos, _ := peer["ph"].([]any)
 	var candidates []cacheCandidate
 	for _, photo := range photos {
 		for _, resourceID := range MediaResourceIDs(photo) {
-			for _, path := range cachedMediaPaths(resourceID, mediaRoot) {
+			for _, path := range cachedMediaPaths(resourceID, mediaRoot, index) {
 				if info, err := os.Stat(path); err == nil && !info.IsDir() {
 					candidates = append(candidates, cacheCandidate{path: path, size: info.Size()})
 				}
@@ -429,16 +443,21 @@ func largestCacheCandidate(candidates []cacheCandidate) (string, int64) {
 	return candidates[0].path, candidates[0].size
 }
 
-func cachedMediaPaths(resourceID, mediaRoot string) []string {
+var readMediaDir = os.ReadDir
+
+func cachedMediaPaths(resourceID, mediaRoot string, index map[string][]string) []string {
 	if resourceID == "" || resourceID == "." || resourceID == ".." || filepath.Base(resourceID) != resourceID {
 		return nil
+	}
+	if index == nil {
+		index = mediaCacheIndex(mediaRoot)
 	}
 	var paths []string
 	exact := filepath.Join(mediaRoot, resourceID)
 	if isCompleteCacheFile(exact, resourceID) {
 		paths = append(paths, exact)
 	}
-	for _, path := range mediaCacheIndex(mediaRoot)[resourceID] {
+	for _, path := range index[resourceID] {
 		if path != exact && isCompleteCacheFile(path, resourceID) {
 			paths = append(paths, path)
 		}
@@ -448,7 +467,7 @@ func cachedMediaPaths(resourceID, mediaRoot string) []string {
 
 func mediaCacheIndex(mediaRoot string) map[string][]string {
 	index := make(map[string][]string)
-	entries, err := os.ReadDir(mediaRoot)
+	entries, err := readMediaDir(mediaRoot)
 	if err != nil {
 		return index
 	}

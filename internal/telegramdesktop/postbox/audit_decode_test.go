@@ -77,13 +77,13 @@ func TestAuditMessageDecodeFailureAbortsExtraction(t *testing.T) {
 				opts.MessagesLimit = 1
 			}
 			source := Source{AccountID: "synthetic-account"}
-			if rows, err := LoadMessageRecords(context.Background(), db, source, nil, nil, t.TempDir(), false, opts); err == nil || len(rows) != 0 {
+			if rows, err := LoadMessageRecords(context.Background(), db, source, nil, nil, t.TempDir(), nil, false, opts); err == nil || len(rows) != 0 {
 				t.Fatalf("truncated message returned %d rows, error %v", len(rows), err)
 			}
 			if _, err := db.Exec(`UPDATE t7 SET value=?`, []byte{1}); err != nil {
 				t.Fatal(err)
 			}
-			if rows, err := LoadMessageRecords(context.Background(), db, source, nil, nil, t.TempDir(), false, opts); err != nil || len(rows) != 0 {
+			if rows, err := LoadMessageRecords(context.Background(), db, source, nil, nil, t.TempDir(), nil, false, opts); err != nil || len(rows) != 0 {
 				t.Fatalf("nonmessage returned %d rows, error %v", len(rows), err)
 			}
 		})
