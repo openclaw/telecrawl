@@ -173,8 +173,9 @@ telecrawl import --path "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.
 
 Native macOS imports include every local `account-*` database they find; if more
 than one account is present, stored chat and sender IDs are account-scoped to
-avoid collisions. They archive cached media by default and store Telegram peer
-records as contacts for message enrichment. Contacts can include phone numbers,
+avoid collisions. Each import indexes each account’s media cache once, archives
+cached media by default, and stores Telegram peer records as contacts for message
+enrichment. Contacts can include phone numbers,
 usernames, and archived avatar paths when those values exist locally, and are
 visible through `telecrawl contacts`. `--fetch-media` also uses the existing
 native Telegram session to fetch missing cloud media when account auth data is
