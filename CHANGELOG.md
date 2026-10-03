@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Finish forum topic loading when a page brings no new topics after the advertised count is reached, instead of failing the whole Telegram Desktop import with "pagination stalled after 7 of 6 topics". Thanks @kirill-trofimov.
+
 ## 0.5.0 - 2026-10-01
 
 **Highlights:** Optional remote-media age and size limits keep imports manageable, while native Postbox imports scan the media cache only once.
