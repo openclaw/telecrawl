@@ -101,9 +101,7 @@ func ReadMessage(value []byte) (*Message, error) {
 		}
 	}
 	if dataFlags&(1<<5) != 0 {
-		if _, err := reader.int64(); err != nil {
-			return nil, err
-		}
+		// hasThreadId: Postbox stores a single Int64 threadId.
 		if _, err := reader.int64(); err != nil {
 			return nil, err
 		}
