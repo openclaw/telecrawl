@@ -65,11 +65,11 @@ with tempfile.TemporaryDirectory(prefix="telecrawl-forum-proof-") as scratch:
         else:
             assert result.returncode != 0 and "deadline exceeded" in result.stderr and "topic_rpc=3" in result.stderr
     else:
-        for scenario in ("success", "under-count", "over-count", "short-page", "missing-date", "deleted-boundary"):
+        for scenario in ("repeat-exact", "repeat-under-count", "success", "under-count", "over-count", "short-page", "missing-date", "deleted-boundary"):
             result = run(scenario, restore=True)
             assert result.returncode == 0, result.stderr
             before = rows()
-            assert len(before[1]) == 101
+            assert len(before[1]) == (7 if scenario.startswith("repeat-") else 101)
         read = subprocess.run([str(binary), "--db", str(db), "--json", "topics", "--chat", "-1000000000042", "--limit", "200"], check=True, capture_output=True, text=True)
         assert len(json.loads(read.stdout)) == 101
         for scenario in ("stalled", "cycle", "rpc-error"):
@@ -78,4 +78,4 @@ with tempfile.TemporaryDirectory(prefix="telecrawl-forum-proof-") as scratch:
                 assert result.returncode != 0
                 assert "incomplete" in result.stderr or "synthetic forum RPC failure" in result.stderr
                 assert rows() == before, f"archive mutated after {scenario}, restore={restore}"
-        print("PASS: 101 topics imported/read with exact/approximate counts, short pages, absent messages and deleted topics; 6 failures preserved chats, topics, messages, revisions and sync state")
+        print("PASS: duplicate-only terminal pages and progressing exact/approximate counts imported; short pages, absent messages and deleted topics handled; 6 failures preserved chats, topics, messages, revisions and sync state")

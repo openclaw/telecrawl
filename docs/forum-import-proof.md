@@ -8,10 +8,13 @@ CLI error propagation and SQLite writes use the production source unchanged.
 No Telegram login or personal archive is accessed. This is RPC-boundary fault
 injection, not a live Telegram service or MTProto authentication test.
 
-Successful cases import 101 topics over two data pages followed by an empty
+Successful duplicate-page cases import seven topics against advertised counts
+of six and seven, then finish on a page repeating the last topic. Other successful
+cases import 101 topics over two data pages followed by an empty
 page, including approximate totals, a short intermediate page, absent top messages
 and a deleted boundary topic, and read them through
-`telecrawl --json topics`. Repeated pages, alternating cycles and RPC failures must exit nonzero in both merge
+`telecrawl --json topics`. Repeated pages and alternating cycles below the
+advertised count, and RPC failures, must exit nonzero in both merge
 and `--restore` mode. All archive rows, message revisions and sync state must
 remain identical after each failure. Temporary binaries and databases are
 removed automatically.

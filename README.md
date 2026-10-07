@@ -215,7 +215,9 @@ Telegram folders, forum topics, reply/thread IDs, pinned messages, edits,
 forwards, reactions, view/reply counts, and richer media titles are archived
 when the local source or Telegram API exposes them for the active account.
 Telegram Desktop forum pagination uses the last-message date (or creation date
-when Telegram explicitly selects that order). Incomplete, stalled, or failed
+when Telegram explicitly selects that order). A page containing only previously
+collected topics finishes paging once a positive advertised count is satisfied.
+Counts alone do not stop pages that still make progress. Incomplete, stalled, or failed
 topic fetches abort the import before archive rows are merged or replaced;
 reaching the 1,000-page safety bound also returns an error.
 

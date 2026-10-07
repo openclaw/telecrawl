@@ -24,6 +24,10 @@ func importTDataGo(ctx context.Context, sourcePath string, opts ImportOptions, d
    page := &tg.MessagesForumTopics{Count: 400}
    start, count := 1, 100
    switch scenario {
+   case "repeat-exact", "repeat-under-count":
+    page.Count, count = 7, 7
+    if scenario == "repeat-under-count" { page.Count = 6 }
+    if calls >= 2 { start, count = 7, 1 }
    case "success", "under-count", "over-count", "short-page", "missing-date", "deleted-boundary":
     page.Count = 101
     if scenario == "under-count" { page.Count = 50 }

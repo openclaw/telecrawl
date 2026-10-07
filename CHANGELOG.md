@@ -5,6 +5,7 @@
 ### Fixed
 
 - Read the native Postbox `threadId` as a single Int64, so messages in chats with threads keep their author, flags, tags and type instead of being decoded from a shifted offset. Thanks @kirill-trofimov.
+- Finish forum topic loading on duplicate-only pages after the advertised count is reached, while still rejecting incomplete or cycling pagination that adds topics. (#56) Thanks @kirill-trofimov.
 
 ## 0.5.0 - 2026-10-01
 

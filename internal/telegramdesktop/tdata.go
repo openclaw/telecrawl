@@ -726,6 +726,11 @@ func collectForumTopics(ctx context.Context, chatJID string, maxPages int, page 
 		nextDate, nextID := forumTopicOffsets(result, last)
 		cursor := [3]int{last.ID, nextID, nextDate}
 		if _, repeated := cursors[cursor]; repeated || len(out) == previous {
+			// Duplicate-only pages can mark the end after the advertised count.
+			// A cycling cursor that still adds topics cannot prove completion.
+			if len(out) == previous && expected > 0 && len(out) >= expected {
+				return out, nil
+			}
 			return out, fmt.Errorf("%w: pagination stalled after %d of %d topics", errForumTopicsIncomplete, len(out), expected)
 		}
 		cursors[cursor] = struct{}{}
