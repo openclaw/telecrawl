@@ -7,6 +7,10 @@
 - Read the native Postbox `threadId` as a single Int64, so messages in chats with threads keep their author, flags, tags and type instead of being decoded from a shifted offset. Thanks @kirill-trofimov.
 - Finish forum topic loading on duplicate-only pages after the advertised count is reached, while still rejecting incomplete or cycling pagination that adds topics. (#56) Thanks @kirill-trofimov.
 
+### Dependencies
+
+- Refresh terminal color handling, decimal, OpenTelemetry, and Go support modules; align deadcode and golangci-lint pins between local checks and CI while retaining the Go 1.27.0 minimum.
+
 ## 0.5.0 - 2026-10-01
 
 **Highlights:** Optional remote-media age and size limits keep imports manageable, while native Postbox imports scan the media cache only once.
