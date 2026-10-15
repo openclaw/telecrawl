@@ -10,6 +10,7 @@
 
 ### Dependencies
 
+- Patch the Gosec tooling module's gRPC dependency for GO-2026-6443; application dependencies are unchanged.
 - Build with Go 1.27.2 and refresh CrawlKit, compression, cryptography, Go support modules, and compatible analyzers while retaining the Go 1.27.0 minimum; expose a non-publishing release dry run.
 - Refresh terminal color handling, decimal, OpenTelemetry, and Go support modules; align deadcode and golangci-lint pins between local checks and CI while retaining the Go 1.27.0 minimum.
 
