@@ -34,10 +34,9 @@ jobs:
 
       - name: Install analyzers
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
           go install mvdan.cc/gofumpt@v0.12.0
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
-          go install golang.org/x/tools/cmd/deadcode@v0.51.0
+          go install golang.org/x/tools/cmd/deadcode@v0.52.0
 
       - name: Vet
         run: go vet ./...
@@ -58,7 +57,7 @@ jobs:
 
       - name: Gosec
         run: |
-          "$(go env GOPATH)/bin/gosec" -exclude=G101,G115,G202,G301,G304 ./...
+          go tool -modfile=tools/go.mod gosec -exclude=G101,G115,G202,G301,G304 ./...
 
   test:
     runs-on: ubuntu-latest
@@ -91,7 +90,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.27.0", "1.27.1"]
+        go: ["1.27.0", "1.27.2"]
     env:
       GOTOOLCHAIN: local
       GOWORK: "off"
@@ -114,10 +113,14 @@ jobs:
           test "$(go env GOVERSION)" = "go${EXPECTED_GO}"
 
       - name: Verify module cache
-        run: go mod verify
+        run: |
+          go mod verify
+          go -C tools mod verify
 
       - name: Check go.mod tidy
-        run: go mod tidy -diff
+        run: |
+          go mod tidy -diff
+          go -C tools mod tidy -diff
 
       - name: Build and test the minimum toolchain
         if: matrix.go == '1.27.0'
@@ -126,16 +129,18 @@ jobs:
           go test -count=1 -p=1 -timeout=120s ./...
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+        if: matrix.go != '1.27.0'
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
 
       - name: Run govulncheck
+        if: matrix.go != '1.27.0'
         run: |
           PATH="$(go env GOPATH)/bin:$PATH"
           export PATH
           bash scripts/check-vulnerabilities.sh "$RUNNER_TEMP/advisories"
 
       - name: Retain advisory evidence
-        if: always()
+        if: always() && matrix.go != '1.27.0'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: advisories-go${{ matrix.go }}

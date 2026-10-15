@@ -28,6 +28,14 @@ The release is complete only when the shared run publishes the exact asset inven
 
 ## Local diagnostics
 
+To validate the current default branch without creating a tag or release, dispatch the shared pipeline with the current version and `dry_run=true`:
+
+```bash
+gh workflow run release-unified.yml --repo openclaw/telecrawl --ref main -f version=0.5.0 -F dry_run=true
+```
+
+The dry run builds, signs, and independently verifies the artifacts without publishing them or changing the Homebrew tap.
+
 Local mutation and release-verification paths are retired. `make release`, `make release-artifacts`, `make release-pilot`, `make release-draft`, `make verify-release`, `make release-homebrew`, and their `scripts/release-local` modes refuse and print the official workflow command. `make snapshot` and `make release-check` remain credential-free diagnostics.
 
 ## Automated reproducible-build gate

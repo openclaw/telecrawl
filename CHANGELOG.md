@@ -4,11 +4,13 @@
 
 ### Fixed
 
+- Clarify backup repository ownership, first-snapshot ordering, and recovery requirements for private keys and media. (#58) Thanks @dougasimpson.
 - Read the native Postbox `threadId` as a single Int64, so messages in chats with threads keep their author, flags, tags and type instead of being decoded from a shifted offset. Thanks @kirill-trofimov.
 - Finish forum topic loading on duplicate-only pages after the advertised count is reached, while still rejecting incomplete or cycling pagination that adds topics. (#56) Thanks @kirill-trofimov.
 
 ### Dependencies
 
+- Build with Go 1.27.2 and refresh CrawlKit, compression, cryptography, Go support modules, and compatible analyzers while retaining the Go 1.27.0 minimum; expose a non-publishing release dry run.
 - Refresh terminal color handling, decimal, OpenTelemetry, and Go support modules; align deadcode and golangci-lint pins between local checks and CI while retaining the Go 1.27.0 minimum.
 
 ## 0.5.0 - 2026-10-01
