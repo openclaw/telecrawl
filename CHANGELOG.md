@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Dependencies
+
+- Refresh Go experimental support and Gosec tooling dependencies while retaining the Go 1.27.0 minimum and SQLite's paired libc version.
+
 ## 0.5.1 - 2026-10-16
 
 **Highlights:** Native Postbox imports preserve message fields in threaded chats, forum topic loading completes reliably, and the Gosec tooling dependency receives a gRPC security fix.
