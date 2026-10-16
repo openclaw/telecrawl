@@ -2,11 +2,15 @@
 
 ## Unreleased
 
+## 0.5.1 - 2026-10-16
+
+**Highlights:** Native Postbox imports preserve message fields in threaded chats, forum topic loading completes reliably, and the Gosec tooling dependency receives a gRPC security fix.
+
 ### Fixed
 
-- Clarify backup repository ownership, first-snapshot ordering, and recovery requirements for private keys and media. (#58) Thanks @dougasimpson.
 - Read the native Postbox `threadId` as a single Int64, so messages in chats with threads keep their author, flags, tags and type instead of being decoded from a shifted offset. Thanks @kirill-trofimov.
 - Finish forum topic loading on duplicate-only pages after the advertised count is reached, while still rejecting incomplete or cycling pagination that adds topics. (#56) Thanks @kirill-trofimov.
+- Clarify backup repository ownership, first-snapshot ordering, and recovery requirements for private keys and media. (#58) Thanks @dougasimpson.
 
 ### Dependencies
 
