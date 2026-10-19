@@ -39,7 +39,7 @@ require (
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
-	github.com/shopspring/decimal v1.5.0 // indirect
+	github.com/shopspring/decimal v1.6.0 // indirect
 	github.com/yuin/goldmark v1.8.6 // indirect
 	go.opentelemetry.io/otel v1.47.0 // indirect
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
