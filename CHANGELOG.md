@@ -2,11 +2,15 @@
 
 ## Unreleased
 
+## 0.5.2 - 2026-10-20
+
+**Highlights:** Refresh decimal handling and Go tooling dependencies while preserving Go 1.27.0 source compatibility.
+
 ### Dependencies
 
-- Refresh Gosec's Anthropic, OpenAI, and Google API SDK dependencies while retaining the Go 1.27.0 minimum and Go 1.27.2 build toolchain.
 - Refresh decimal handling and Gosec's SDK, Google API, and parser dependencies while preserving Go 1.27.0 support and SQLite's paired libc version.
 - Refresh Go experimental support and Gosec tooling dependencies while retaining the Go 1.27.0 minimum and SQLite's paired libc version.
+- Refresh Gosec's Anthropic, OpenAI, and Google API SDK dependencies while retaining the Go 1.27.0 minimum and Go 1.27.2 build toolchain.
 
 ## 0.5.1 - 2026-10-16
 
