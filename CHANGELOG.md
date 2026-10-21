@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.5.3 - 2026-10-20
+
+**Highlights:** Rebuild with Go 1.27.3 to fix the reachable crypto/x509 certificate-validation vulnerability.
+
+### Security
+
+- Build with Go 1.27.3 to fix the reachable crypto/x509 certificate-validation vulnerability GO-2026-6809 while retaining the Go 1.27.0 minimum.
+
 ## 0.5.2 - 2026-10-20
 
 **Highlights:** Refresh decimal handling and Go tooling dependencies while preserving Go 1.27.0 source compatibility.
