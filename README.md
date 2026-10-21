@@ -37,9 +37,9 @@ go install github.com/openclaw/telecrawl/cmd/telecrawl@latest
 
 Source builds require Go 1.27.0 or newer (macOS 13 or newer on macOS).
 CI checks Go 1.27.0 build and test compatibility separately; preferred builds,
-Docker, and vulnerability checks use Go 1.27.2. Use the patched toolchain for
+Docker, and vulnerability checks use Go 1.27.3. Use the patched toolchain for
 production builds.
-Gosec uses the separate `tools` module to pin a Go 1.27.2-compatible parser
+Gosec uses the separate `tools` module to pin a Go 1.27-compatible parser
 without adding analyzer dependencies to the application module. `make lint`
 and CI both run it from the repository root.
 This source-build requirement does not change the support claims of older
