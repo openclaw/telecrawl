@@ -104,8 +104,14 @@ be combined with `--restore`.
 Large native Postbox databases may contain an all-zero SQLite reserved locking
 page at the 1 GiB boundary. Imports preserve that reserved page and continue to
 authenticate every data page; other zero pages or invalid HMACs abort the import.
-Native decryption still loads the database into memory, so large sources require
-substantial available RAM.
+Native imports include committed transactions still in `db_sqlite-wal`, even
+before Telegram checkpoints them into the main database. If Telegram keeps
+changing the database during snapshot capture, the import stops before archive
+writes; quit Telegram and retry. Incomplete WAL transactions are ignored, and
+committed pages must pass SQLCipher authentication.
+
+Native decryption still loads the database and its WAL into memory, so large
+sources require substantial available RAM.
 
 Maintainers can reproduce the locking-page import with a generated synthetic
 database (more than 1 GiB of disk and several GiB of RAM):

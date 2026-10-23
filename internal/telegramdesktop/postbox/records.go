@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -94,11 +93,23 @@ func ReadSourceRecordsWithOptions(ctx context.Context, source Source, keyAndSalt
 }
 
 func OpenDecryptedDB(ctx context.Context, dbPath string, keyAndSalt []byte) (*sql.DB, func(), error) {
-	encrypted, err := os.ReadFile(dbPath)
+	return openDecryptedDB(ctx, dbPath, keyAndSalt, nil)
+}
+
+func openDecryptedDB(ctx context.Context, dbPath string, keyAndSalt []byte, snapshotHook func(attempt int, stage string)) (*sql.DB, func(), error) {
+	// The main file and WAL must describe one snapshot: an older WAL replayed
+	// over a newer checkpointed main file would produce a state that never
+	// committed.
+	encrypted, wal, err := readSQLiteSnapshot(ctx, dbPath, snapshotHook)
 	if err != nil {
 		return nil, func() {}, err
 	}
-	plain, err := DecryptSQLCipherV4(encrypted, keyAndSalt)
+	decrypted, err := DecryptSQLCipherV4(encrypted, keyAndSalt)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	defer zeroBytes(decrypted)
+	plain, err := ApplySQLCipherV4WAL(decrypted, wal, keyAndSalt)
 	if err != nil {
 		return nil, func() {}, err
 	}
