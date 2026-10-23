@@ -6,6 +6,10 @@
 
 - Replay committed SQLCipher WAL frames during native Postbox imports, with consistent snapshot retries and bounded allocation, so uncheckpointed messages are preserved. (#68, #69) Thanks @parth-garg01.
 
+### Dependencies
+
+- Update gotd to v0.163.0, CrawlKit to v0.17.2, SQLite to v1.61.0 with libc v1.79.0, and Gosec SDK dependencies while preserving the Go 1.27.0 language baseline and Go 1.27.3 build toolchain.
+
 ## 0.5.3 - 2026-10-20
 
 **Highlights:** Rebuild with Go 1.27.3 to fix the reachable crypto/x509 certificate-validation vulnerability.
