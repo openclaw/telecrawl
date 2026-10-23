@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.4 - 2026-10-23
+
+**Highlights:** Preserve uncheckpointed messages during native Postbox imports by replaying committed SQLCipher WAL frames.
+
 ### Fixed
 
 - Replay committed SQLCipher WAL frames during native Postbox imports, with consistent snapshot retries and bounded allocation, so uncheckpointed messages are preserved. (#68, #69) Thanks @parth-garg01.
