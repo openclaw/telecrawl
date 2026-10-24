@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Update CrawlKit to v0.17.3 so SQLite lock waits honor context deadlines, with SQLite 3.54.1.
+
 ## 0.5.4 - 2026-10-23
 
 **Highlights:** Preserve uncheckpointed messages during native Postbox imports by replaying committed SQLCipher WAL frames.
