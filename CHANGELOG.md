@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Dependencies
+
+- Refresh Brotli and network helpers plus the isolated Gosec SDK dependencies while retaining the Go baseline and SQLite compatibility pins.
+
 ## 0.5.5 - 2026-10-26
 
 **Highlights:** SQLite lock waits honor context deadlines, with SQLite 3.54.1.
