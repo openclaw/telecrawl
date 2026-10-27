@@ -31,7 +31,7 @@ The release is complete only when the shared run publishes the exact asset inven
 To validate the current default branch without creating a tag or release, dispatch the shared pipeline with the current version and `dry_run=true`:
 
 ```bash
-gh workflow run release-unified.yml --repo openclaw/telecrawl --ref main -f version=0.5.4 -F dry_run=true
+gh workflow run release-unified.yml --repo openclaw/telecrawl --ref main -f version=0.5.5 -F dry_run=true
 ```
 
 The dry run builds, signs, and independently verifies the artifacts without publishing them or changing the Homebrew tap.
