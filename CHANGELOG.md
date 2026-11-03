@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Batch main CodeQL analysis weekly while preserving PR and manual scans.
+
 ### Dependencies
 
 - Refresh Brotli and network helpers plus the isolated Gosec SDK dependencies while retaining the Go baseline and SQLite compatibility pins.
