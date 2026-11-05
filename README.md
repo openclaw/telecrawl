@@ -12,7 +12,7 @@ shards.
 It is local-first:
 
 - Normal archive/search commands do not upload data.
-- `backup push` uploads only age-encrypted shards when you run it explicitly.
+- `backup init` and `backup push` upload only with a configured remote; `--no-push` keeps changes local.
 - Telegram message text, chat names, sender names, contact phone numbers,
   contact usernames, avatar path metadata, and media metadata stay inside
   encrypted backup payloads.
@@ -288,16 +288,17 @@ telecrawl backup push
 telecrawl backup status
 ```
 
-For compatibility, the built-in default backup config still points at the
-maintainer's repository. Other users should override `--remote` as above;
-running the default commands does not create a repository in your account:
+There is no default remote. Without `--remote`, a saved `remote`, or an existing
+Git `origin`, `backup init` and `backup push` commit locally without uploading.
+Their output reports `pushed: false` when no upload occurs. `--no-push` also
+keeps changes local when a remote exists. Existing saved remotes and Git origins
+keep working and are not silently rewritten; an existing origin takes precedence.
 
-```json
-{
-  "repo": "~/Projects/backup-telecrawl",
-  "remote": "https://github.com/steipete/backup-telecrawl.git",
-  "identity": "~/.telecrawl/age.key"
-}
+Initialize a local-only backup without GitHub access:
+
+```bash
+telecrawl backup init
+telecrawl backup push
 ```
 
 Use a different repository or config path:

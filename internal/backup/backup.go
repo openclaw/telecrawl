@@ -47,6 +47,7 @@ type archiveMetadata struct {
 type ShardEntry = ckbackup.ShardEntry
 
 type Result struct {
+	Pushed    bool   `json:"pushed"`
 	Repo      string `json:"repo"`
 	Changed   bool   `json:"changed"`
 	Encrypted bool   `json:"encrypted"`
@@ -145,8 +146,13 @@ func Push(ctx context.Context, st *store.Store, opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	pushWithTag := opts.Push && strings.TrimSpace(opts.Tag) != ""
-	changed, err := commitAndPush(ctx, cfg, "sync: update encrypted telecrawl backup", opts.Push && !pushWithTag, toCrawlkitManifest(oldManifest), toCrawlkitManifest(manifest))
+	hasRemote, err := HasRemote(ctx, cfg)
+	if err != nil {
+		return Result{}, err
+	}
+	push := opts.Push && hasRemote
+	pushWithTag := push && strings.TrimSpace(opts.Tag) != ""
+	changed, err := commitAndPush(ctx, cfg, "sync: update encrypted telecrawl backup", push && !pushWithTag, toCrawlkitManifest(oldManifest), toCrawlkitManifest(manifest))
 	if err != nil {
 		return Result{}, err
 	}
@@ -164,7 +170,7 @@ func Push(ctx context.Context, st *store.Store, opts Options) (Result, error) {
 			return Result{}, err
 		}
 	}
-	return Result{Repo: cfg.Repo, Changed: changed, Encrypted: true, Shards: len(manifest.Shards), Messages: manifest.Counts.Messages, Tag: tag}, nil
+	return Result{Pushed: push, Repo: cfg.Repo, Changed: changed, Encrypted: true, Shards: len(manifest.Shards), Messages: manifest.Counts.Messages, Tag: tag}, nil
 }
 
 func Pull(ctx context.Context, st *store.Store, opts Options) (Result, error) {

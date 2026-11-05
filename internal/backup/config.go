@@ -9,10 +9,6 @@ import (
 	"strings"
 )
 
-const (
-	defaultRemote = "https://github.com/steipete/backup-telecrawl.git"
-)
-
 type Config struct {
 	Repo       string   `json:"repo"`
 	Remote     string   `json:"remote"`
@@ -38,7 +34,6 @@ type Options struct {
 func DefaultConfig() Config {
 	return Config{
 		Repo:     "~/Projects/backup-telecrawl",
-		Remote:   defaultRemote,
 		Identity: "~/.telecrawl/age.key",
 	}
 }

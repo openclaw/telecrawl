@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep new backups local until a remote is configured, preserve saved remotes and existing origins, and report whether an upload occurred. Thanks @NasAndNora for raising the shared default-remote issue.
+
 - Batch main CodeQL analysis weekly while preserving PR and manual scans.
 
 ### Dependencies
