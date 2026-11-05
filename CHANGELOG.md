@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.6.0 - 2026-11-05
+
+**Highlights:** New backups stay local until a remote is configured; saved remotes and existing origins keep working. Dependency updates remove retired OpenPGP code flagged by GO-2026-5932.
+
 - Keep new backups local until a remote is configured, preserve saved remotes and existing origins, and report whether an upload occurred. Thanks @NasAndNora for raising the shared default-remote issue.
 
 - Batch main CodeQL analysis weekly while preserving PR and manual scans.
