@@ -6,6 +6,7 @@
 
 ### Dependencies
 
+- Refresh SQLite, Goldmark, the release action and isolated Gosec SDK dependencies; remove the retired OpenPGP code flagged by GO-2026-5932 while retaining the Go baseline and SQLite/libc pairing.
 - Refresh Brotli and network helpers plus the isolated Gosec SDK dependencies while retaining the Go baseline and SQLite compatibility pins.
 
 ## 0.5.5 - 2026-10-26
