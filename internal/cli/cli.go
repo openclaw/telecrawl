@@ -1032,7 +1032,11 @@ func (r *runtime) backupInit(args []string) error {
 	if err != nil {
 		return err
 	}
-	return r.print(map[string]any{"repo": cfg.Repo, "remote": cfg.Remote, "identity": cfg.Identity, "recipient": recipient})
+	hasRemote, err := backup.HasRemote(r.ctx, cfg)
+	if err != nil {
+		return err
+	}
+	return r.print(map[string]any{"repo": cfg.Repo, "remote": cfg.Remote, "identity": cfg.Identity, "recipient": recipient, "pushed": opts.Push && hasRemote})
 }
 
 func (r *runtime) backupPush(args []string) error {
@@ -1266,7 +1270,8 @@ notes:
   imports and backup pulls merge by default; --restore replaces the entire existing archive
   --adopt-source non-destructively records a verified legacy archive's current source
   import archives local cached Postbox media by default; --fetch-media also tries Telegram cloud media, bounded by --fetch-media-max-age (for example 168h) and --fetch-media-max-mb when set
-  backup writes encrypted age shards to a git repo
+  backup writes encrypted age shards to a git repo; pushed=false means the backup stays local
+  backup init/push uploads only with --remote, a saved remote, or an existing origin; --no-push keeps it local
 `)
 }
 
