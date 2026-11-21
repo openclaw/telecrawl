@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Refresh Telegram, CrawlKit, SQLite and analysis dependencies; build with Go 1.27.4 while retaining the Go 1.27.0 language baseline and SQLite's paired libc version.
+
 ## 0.6.0 - 2026-11-05
 
 **Highlights:** New backups stay local until a remote is configured; saved remotes and existing origins keep working. Dependency updates remove retired OpenPGP code flagged by GO-2026-5932.
