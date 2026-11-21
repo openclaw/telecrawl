@@ -98,12 +98,12 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27.3"
+          go-version: "1.27.4"
           cache: true
 
       - name: Assert actual compiler
         env:
-          EXPECTED_GO: "1.27.3"
+          EXPECTED_GO: "1.27.4"
         run: |
           go version
           test "$(go env GOVERSION)" = "go${EXPECTED_GO}"
@@ -131,7 +131,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: advisories-go1.27.3
+          name: advisories-go1.27.4
           path: ${{ runner.temp }}/advisories
           if-no-files-found: error
 

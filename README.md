@@ -37,7 +37,7 @@ go install github.com/openclaw/telecrawl/cmd/telecrawl@latest
 
 Supported source builds require Go 1.27.3 or newer (macOS 13 or newer on macOS).
 The module retains the Go 1.27.0 language baseline. CI, Docker, and vulnerability
-checks use the patched Go 1.27.3 compiler so dependency downloads reject the
+checks use the patched Go 1.27.4 compiler so dependency downloads reject the
 compromised eMudhra keys.
 Gosec uses the separate `tools` module to pin a Go 1.27-compatible parser
 without adding analyzer dependencies to the application module. `make lint`
